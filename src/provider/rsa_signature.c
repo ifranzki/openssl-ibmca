@@ -877,9 +877,10 @@ static int ibmca_signature_rsa_verify(void *vctx,
             tbslen = diginfo_len;
         }
 
-        rc = ibmca_rsa_check_pkcs1_padding(ctx->key->provctx, 1,
-                                           dec_data, dec_data_len, NULL,
-                                           dec_data_len, &data, &data_len);
+        rc = ibmca_rsa_check_pkcs1_padding_type1(ctx->key->provctx,
+                                                 dec_data, dec_data_len, NULL,
+                                                 dec_data_len, &data,
+                                                 &data_len);
         break;
 
     case RSA_X931_PADDING:
@@ -1040,9 +1041,10 @@ static int ibmca_signature_rsa_verify_recover(void *vctx,
 
     case RSA_PKCS1_PADDING:
         if (ctx->rsa.signature.md != NULL) {
-            rc = ibmca_rsa_check_pkcs1_padding(ctx->key->provctx, 1,
-                                              dec_data, dec_data_len, NULL,
-                                              *routlen, &msg, &msg_len);
+            rc = ibmca_rsa_check_pkcs1_padding_type1(ctx->key->provctx,
+                                                     dec_data, dec_data_len,
+                                                     NULL, *routlen, &msg,
+                                                     &msg_len);
             if (rc == 0)
                 break;
 
@@ -1077,9 +1079,10 @@ static int ibmca_signature_rsa_verify_recover(void *vctx,
             memcpy(rout, msg + msg_len - md_len, md_len);
             *routlen = md_len;
         } else {
-            rc = ibmca_rsa_check_pkcs1_padding(ctx->key->provctx, 1,
-                                              dec_data, dec_data_len, rout,
-                                              *routlen, NULL, routlen);
+            rc = ibmca_rsa_check_pkcs1_padding_type1(ctx->key->provctx,
+                                                     dec_data, dec_data_len,
+                                                     rout, *routlen, NULL,
+                                                     routlen);
         }
         break;
 
