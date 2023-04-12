@@ -131,7 +131,9 @@ struct ibmca_key {
             BN_BLINDING *mt_blinding;
             pthread_rwlock_t blinding_lock;
             BN_MONT_CTX *blinding_mont_ctx;
+#ifndef HAVE_ALT_FIX_FOR_CVE2022_4304
             BN_ULONG blinding_mont_ctx_n0;
+#endif
         } rsa; /* For type EVP_PKEY_RSA and EVP_PKEY_RSA_PSS */
         struct {
             int curve_nid;
@@ -522,11 +524,13 @@ int ibmca_keymgmt_rsa_pub_as_bn(struct ibmca_key *key, BIGNUM **n, BIGNUM **e);
 int ibmca_rsa_crt_with_blinding(struct ibmca_key *key, const unsigned char *in,
                                 unsigned char *out, size_t rsa_size);
 
+#ifndef HAVE_ALT_FIX_FOR_CVE2022_4304
 int ossl_bn_rsa_do_unblind(const unsigned char *intermediate,
                            const BIGNUM *unblind,
                            const unsigned char *to_mod,
                            unsigned char *buf, int num,
                            BN_MONT_CTX *m_ctx, BN_ULONG n0);
+#endif
 
 extern const OSSL_ALGORITHM ibmca_ec_keymgmt[];
 extern const OSSL_ALGORITHM ibmca_ec_signature[];

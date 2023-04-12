@@ -110,10 +110,13 @@ out:
 
 static BN_BLINDING *ibmca_rsa_setup_blinding(struct ibmca_key *key)
 {
-    BIGNUM *n = NULL, *e = NULL, *R = NULL, *Ri = NULL, *tmod = NULL;
+    BIGNUM *n = NULL, *e = NULL;
     BN_CTX *bn_ctx = NULL;
     BN_BLINDING *blinding = NULL;
+#ifndef HAVE_ALT_FIX_FOR_CVE2022_4304
+    BIGNUM *R = NULL, *Ri = NULL, *tmod = NULL;
     BN_ULONG word;
+#endif
     int rc;
 
     ibmca_debug_key(key, "key: %p", key);
@@ -156,6 +159,7 @@ static BN_BLINDING *ibmca_rsa_setup_blinding(struct ibmca_key *key)
             goto out;
         }
 
+#ifndef HAVE_ALT_FIX_FOR_CVE2022_4304
         /* Calculate blinding_mont_ctx_n0, BN_MONT_CTX is opaque */
         R = BN_CTX_get(bn_ctx);
         Ri = BN_CTX_get(bn_ctx);
@@ -207,6 +211,7 @@ static BN_BLINDING *ibmca_rsa_setup_blinding(struct ibmca_key *key)
         }
 
         key->rsa.blinding_mont_ctx_n0 = BN_get_word(Ri);
+#endif
     }
 
     /*
@@ -366,14 +371,60 @@ out:
 }
 
 static int ibmca_rsa_blinding_invert(struct ibmca_key *key,
-                                     BIGNUM *unblind,
+                                     BN_BLINDING *blinding,
+                                     BIGNUM *unblind, BN_CTX *bn_ctx,
                                      const unsigned char *in,
                                      unsigned char *out,
                                      size_t rsa_size)
 {
     int rc;
+#ifdef HAVE_ALT_FIX_FOR_CVE2022_4304
+    BIGNUM *bn_data = NULL;
+#endif
 
     ibmca_debug_key(key, "key: %p rsa_size: %lu", key, rsa_size);
+
+#ifdef HAVE_ALT_FIX_FOR_CVE2022_4304
+    bn_data = BN_CTX_get(bn_ctx);
+    if (bn_data == NULL ||
+        BN_bin2bn(in, rsa_size, bn_data) == NULL) {
+        put_error_key(key, IBMCA_ERR_INTERNAL_ERROR,
+                      "BN_CTX_get/BN_bin2bn failed");
+        rc = 0;
+        goto out;
+    }
+    BN_set_flags(bn_data, BN_FLG_CONSTTIME);
+
+    /*
+     * BN_BLINDING_invert_ex is constant-time since OpenSSL commit
+     * https://github.com/openssl/openssl/commit/f06ef1657a3d4322153b26231a7afa3d55724e52
+     * "Alternative fix for CVE-2022-4304". Care must be taken that bn_data
+     * has flag BN_FLG_CONSTTIME set.
+     *
+     * Commits for OpenSSL releases:
+     * - OpenSSL 1.1.1u:
+     *   https://github.com/openssl/openssl/commit/3f499b24f3bcd66db022074f7e8b4f6ee266a3ae
+     * - OpenSSL 3.0.9:
+     *   https://github.com/openssl/openssl/commit/a00d757d9ca212994625d1a02c81cc5edd27e13b
+     * - OpenSSl 3.1.1:
+     *   https://github.com/openssl/openssl/commit/550a16247e899363ef973aa08623f9b19bb636fb
+     */
+    rc = BN_BLINDING_invert_ex(bn_data, unblind, blinding, bn_ctx);
+    if (rc != 1) {
+        put_error_key(key, IBMCA_ERR_INTERNAL_ERROR,
+                      "BN_BLINDING_invert_ex failed");
+        rc = 0;
+        goto out;
+    }
+
+    if (BN_bn2binpad(bn_data, out, rsa_size) != (int)rsa_size) {
+        put_error_key(key, IBMCA_ERR_INTERNAL_ERROR, "BN_bn2binpad failed");
+        rc = 0;
+        goto out;
+    }
+#else
+    UNUSED(blinding);
+    UNUSED(bn_ctx);
 
     rc = ossl_bn_rsa_do_unblind(in, unblind, key->rsa.public.modulus,
                                 out, rsa_size, key->rsa.blinding_mont_ctx,
@@ -381,8 +432,10 @@ static int ibmca_rsa_blinding_invert(struct ibmca_key *key,
     if (rc <= 0) {
         put_error_key(key, IBMCA_ERR_INTERNAL_ERROR,
                       "ossl_bn_rsa_do_unblind failed");
+        rc = 0;
         goto out;
     }
+#endif
 
     rc = 1;
 
@@ -454,7 +507,8 @@ int ibmca_rsa_crt_with_blinding(struct ibmca_key *key, const unsigned char *in,
         goto out;
     }
 
-    rc = ibmca_rsa_blinding_invert(key, unblind, buf + rsa_size, out, rsa_size);
+    rc = ibmca_rsa_blinding_invert(key, blinding, unblind, bn_ctx,
+                                   buf + rsa_size, out, rsa_size);
     if (rc == 0) {
         ibmca_debug_key(key,
                         "ERROR: ibmca_rsa_blinding_invert failed");

@@ -150,6 +150,28 @@ fi
 
 AC_CHECK_DECLS([ica_cleanup],,,[#include <ica_api.h>])
 
+AC_MSG_CHECKING([whether OpenSSL has alternate fix for CVE 2022-4304])
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+			[[
+			#include <openssl/opensslv.h>
+			#if OPENSSL_VERSION_NUMBER < 0x1010115fL
+				#error "< OpenSSl 1.1.1u"
+			#endif
+			#if OPENSSL_VERSION_NUMBER >= 0x30000000L && OPENSSL_VERSION_NUMBER < 0x30000090L
+				#error "< OpenSSl 3.0.9"
+			#endif
+			#if OPENSSL_VERSION_NUMBER >= 0x30100000L && OPENSSL_VERSION_NUMBER < 0x30100010L
+				#error "< OpenSSl 3.1.1"
+			#endif
+			]],[[int dummy;]])],
+		  [have_alt_fix_for_cve_2022_4304=yes
+		   CFLAGS="$CFLAGS -DHAVE_ALT_FIX_FOR_CVE2022_4304"
+		   AC_MSG_RESULT([yes])],
+		  [have_alt_fix_for_cve_2022_4304=no
+		  AC_MSG_RESULT([no])])
+AM_CONDITIONAL([HAVE_ALT_FIX_FOR_CVE_2022_4304], [test "x$have_alt_fix_for_cve_2022_4304" = "xyes"])
+
+
 AC_CONFIG_FILES([
 	Makefile
 	src/Makefile
