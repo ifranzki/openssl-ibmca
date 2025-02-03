@@ -431,6 +431,10 @@ static int check_eckey(int nid, const char *curvename)
     OSSL_PARAM params[2];
     unsigned int   nonce_type;
 #endif
+#ifdef OSSL_PKEY_PARAM_DHKEM_IKM
+    EVP_PKEY      *ec_pkey1 = NULL, *ec_pkey2 = NULL;
+    const char     dhkem_ikm[100] = { 0 };
+#endif
 
     memset(digest, 0, sizeof(digest));
 
@@ -441,6 +445,40 @@ static int check_eckey(int nid, const char *curvename)
         ok = 1; /* Curve not supported, skip */
         goto out;
     }
+
+#ifdef OSSL_PKEY_PARAM_DHKEM_IKM
+    /* Test DHKEM keygen */
+    switch (nid) {
+    case NID_X9_62_prime256v1:
+    case NID_secp384r1:
+    case NID_secp521r1:
+        params[0] = OSSL_PARAM_construct_octet_string(OSSL_PKEY_PARAM_DHKEM_IKM,
+                                                      (void *)dhkem_ikm,
+                                                      sizeof(dhkem_ikm));
+        params[1] = OSSL_PARAM_construct_end();
+
+        /* Keygen using DHKEM with IBMCA provider */
+        if (!generate_key("ibmca", nid, curvename, params, NULL, &ec_pkey1))
+            goto out;
+
+        /* Keygen using DHKEM with default provider */
+        if (!generate_key(NULL, nid, curvename, params, NULL, &ec_pkey2))
+            goto out;
+
+        /* Compare key from IBMCA with key from default provider */
+        if (!EVP_PKEY_eq(ec_pkey1, ec_pkey2)) {
+            fprintf(stderr, "EC keys generated via DHKEM do not match\n");
+            ok = 1;
+            goto out;
+        }
+
+        EVP_PKEY_free(ec_pkey1);
+        ec_pkey1 = NULL;
+        EVP_PKEY_free(ec_pkey2);
+        ec_pkey2 = NULL;
+        break;
+    }
+#endif
 
     /* Sign with IBMCA provider */
     siglen = sizeof(sigbuf);
@@ -564,6 +602,12 @@ static int check_eckey(int nid, const char *curvename)
        EVP_PKEY_free(peer_pkey);
     if (ec_pkey)
        EVP_PKEY_free(ec_pkey);
+#ifdef OSSL_PKEY_PARAM_DHKEM_IKM
+    if (ec_pkey1)
+       EVP_PKEY_free(ec_pkey1);
+    if (ec_pkey2)
+       EVP_PKEY_free(ec_pkey2);
+#endif
 
     ERR_print_errors_fp(stderr);
 
