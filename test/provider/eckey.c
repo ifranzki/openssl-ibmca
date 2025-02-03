@@ -61,6 +61,10 @@ int check_eckey(int nid, const char *name)
     OSSL_PARAM params[2];
     unsigned int nonce_type;
 #endif
+#ifdef OSSL_PKEY_PARAM_DHKEM_IKM
+    EVP_PKEY      *ec_pkey1 = NULL, *ec_pkey2 = NULL;
+    const char    dhkem_ikm[100] = { 0 };
+#endif
 
     memset(digest, 0, sizeof(digest));
 
@@ -112,6 +116,144 @@ int check_eckey(int nid, const char *name)
     }
 
     EVP_PKEY_CTX_free(ctx);
+
+#ifdef OSSL_PKEY_PARAM_DHKEM_IKM
+    /* Test DHKEM keygen */
+    switch (nid) {
+    case NID_X9_62_prime256v1:
+    case NID_secp384r1:
+    case NID_secp521r1:
+        /* Keygen using DHKEM with IBMCA provider */
+        ctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", "?provider=ibmca");
+        if (ctx == NULL) {
+            fprintf(stderr, "EVP_PKEY_CTX_new_from_name failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_keygen_init(ctx) <= 0) {
+            fprintf(stderr, "EVP_PKEY_keygen_init failed\n");
+            goto out;
+        }
+
+        provider = EVP_PKEY_CTX_get0_provider(ctx);
+        if (provider == NULL) {
+            fprintf(stderr, "Context is not a provider-context\n");
+            goto out;
+        }
+
+        provname = OSSL_PROVIDER_get0_name(provider);
+        if (strcmp(provname, "ibmca") != 0) {
+            fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
+                   provname);
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, nid) <= 0) {
+            if (ERR_GET_REASON(ERR_peek_last_error()) == 7) {
+                /* curve not supported => test passed */
+                fprintf(stderr, "Curve %s not supported by OpenSSL\n", name);
+            } else {
+                fprintf(stderr, "EVP_PKEY_CTX_set_ec_paramgen_curve_nid failed\n");
+            }
+            ret = 1;
+            goto out;
+        }
+
+        params[0] = OSSL_PARAM_construct_octet_string(OSSL_PKEY_PARAM_DHKEM_IKM,
+                                                      (void *)dhkem_ikm,
+                                                      sizeof(dhkem_ikm));
+        params[1] = OSSL_PARAM_construct_end();
+        if (EVP_PKEY_CTX_set_params(ctx, params) != 1) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_params failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_keygen(ctx, &ec_pkey1) <= 0) {
+            if (ERR_GET_REASON(ERR_peek_last_error()) == 7) {
+                /* curve not supported => test passed */
+                fprintf(stderr, "Curve %s not supported by OpenSSL\n", name);
+                ret = 1;
+            } else {
+                fprintf(stderr, "EVP_PKEY_keygen failed\n");
+            }
+            goto out;
+        }
+
+        EVP_PKEY_CTX_free(ctx);
+
+        /* Keygen using DHKEM with default provider */
+        ctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", "provider=default");
+        if (ctx == NULL) {
+            fprintf(stderr, "EVP_PKEY_CTX_new_from_name failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_keygen_init(ctx) <= 0) {
+            fprintf(stderr, "EVP_PKEY_keygen_init failed\n");
+            goto out;
+        }
+
+        provider = EVP_PKEY_CTX_get0_provider(ctx);
+        if (provider == NULL) {
+            fprintf(stderr, "Context is not a provider-context\n");
+            goto out;
+        }
+
+        provname = OSSL_PROVIDER_get0_name(provider);
+        if (strcmp(provname, "default") != 0) {
+            fprintf(stderr, "Context is not using the default provider, but '%s'\n",
+                   provname);
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, nid) <= 0) {
+            if (ERR_GET_REASON(ERR_peek_last_error()) == 7) {
+                /* curve not supported => test passed */
+                fprintf(stderr, "Curve %s not supported by OpenSSL\n", name);
+            } else {
+                fprintf(stderr, "EVP_PKEY_CTX_set_ec_paramgen_curve_nid failed\n");
+            }
+            ret = 1;
+            goto out;
+        }
+
+        params[0] = OSSL_PARAM_construct_octet_string(OSSL_PKEY_PARAM_DHKEM_IKM,
+                                                      (void *)dhkem_ikm,
+                                                      sizeof(dhkem_ikm));
+        params[1] = OSSL_PARAM_construct_end();
+        if (EVP_PKEY_CTX_set_params(ctx, params) != 1) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_params failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_keygen(ctx, &ec_pkey2) <= 0) {
+            if (ERR_GET_REASON(ERR_peek_last_error()) == 7) {
+                /* curve not supported => test passed */
+                fprintf(stderr, "Curve %s not supported by OpenSSL\n", name);
+            } else {
+                ret = 1;
+                fprintf(stderr, "EVP_PKEY_keygen failed\n");
+            }
+            goto out;
+        }
+
+        EVP_PKEY_CTX_free(ctx);
+        ctx = NULL;
+
+        /* Compare key from IBMCA with key from default provider */
+        if (!EVP_PKEY_eq(ec_pkey1, ec_pkey2)) {
+            fprintf(stderr, "EC keys generated via DHKEM do not match\n");
+            ret = 1;
+            goto out;
+        }
+
+        EVP_PKEY_free(ec_pkey1);
+        ec_pkey1 = NULL;
+        EVP_PKEY_free(ec_pkey2);
+        ec_pkey2 = NULL;
+        break;
+    }
+#endif
 
     /* Sign with IBMCA provider */
     ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "?provider=ibmca");
@@ -915,6 +1057,12 @@ int check_eckey(int nid, const char *name)
        EVP_PKEY_free(peer_pkey);
     if (ec_pkey)
        EVP_PKEY_free(ec_pkey);
+#ifdef OSSL_PKEY_PARAM_DHKEM_IKM
+    if (ec_pkey1)
+       EVP_PKEY_free(ec_pkey1);
+    if (ec_pkey2)
+       EVP_PKEY_free(ec_pkey2);
+#endif
     if (ctx)
        EVP_PKEY_CTX_free(ctx);
     if (md_ctx)
