@@ -55,6 +55,12 @@ int check_eckey(int nid, const char *name)
     unsigned char  digest[32];
     const OSSL_PROVIDER *provider;
     const char *provname;
+#ifdef OSSL_SIGNATURE_PARAM_NONCE_TYPE
+    size_t         siglen2;
+    unsigned char  sigbuf2[1024];
+    OSSL_PARAM params[2];
+    unsigned int nonce_type;
+#endif
 
     memset(digest, 0, sizeof(digest));
 
@@ -533,7 +539,142 @@ int check_eckey(int nid, const char *name)
         ret  =0;
     }
 
+    EVP_MD_CTX_free(md_ctx);
+    md_ctx = NULL;
     ctx = NULL;
+
+#ifdef OSSL_SIGNATURE_PARAM_NONCE_TYPE
+    /* Digest-Sign using deterministic signature with default provider */
+    md_ctx = EVP_MD_CTX_new();
+    if (md_ctx == NULL) {
+        fprintf(stderr, "EVP_MD_CTX_new failed\n");
+        goto out;
+    }
+
+    if (EVP_DigestSignInit_ex(md_ctx, &ctx, "SHA256", NULL,
+                               "provider=default", ec_pkey, NULL) == 0) {
+        fprintf(stderr, "EVP_DigestSignInit_ex failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    provider = EVP_PKEY_CTX_get0_provider(ctx);
+    if (provider == NULL) {
+        fprintf(stderr, "Context is not a provider-context\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    provname = OSSL_PROVIDER_get0_name(provider);
+    if (strcmp(provname, "default") != 0) {
+        fprintf(stderr, "Context is not using the default provider, but '%s'\n",
+               provname);
+        goto out;
+    }
+
+    nonce_type = 1;
+    params[0] = OSSL_PARAM_construct_uint(OSSL_SIGNATURE_PARAM_NONCE_TYPE,
+                                          &nonce_type);
+    params[1] = OSSL_PARAM_construct_end();
+    if (EVP_PKEY_CTX_set_params(ctx, params) == 0) {
+        fprintf(stderr, "EVP_PKEY_CTX_set_params (OSSL_SIGNATURE_PARAM_NONCE_TYPE) failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    if (EVP_DigestSignUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
+        fprintf(stderr, "EVP_DigestSignUpdate (1) failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    if (EVP_DigestSignUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
+        fprintf(stderr, "EVP_DigestSignUpdate (2) failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    siglen = sizeof(sigbuf);
+    if (EVP_DigestSignFinal(md_ctx, sigbuf, &siglen) <= 0) {
+        fprintf(stderr, "EVP_DigestSignFinal failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    EVP_MD_CTX_free(md_ctx);
+    ctx = NULL;
+
+    /* Digest-Sign using deterministic signature with IBMCA provider */
+    md_ctx = EVP_MD_CTX_new();
+    if (md_ctx == NULL) {
+        fprintf(stderr, "EVP_MD_CTX_new failed\n");
+        goto out;
+    }
+
+    if (EVP_DigestSignInit_ex(md_ctx, &ctx, "SHA256", NULL,
+                              "?provider=ibmca", ec_pkey, NULL) == 0) {
+        fprintf(stderr, "EVP_DigestSignInit_ex failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    provider = EVP_PKEY_CTX_get0_provider(ctx);
+    if (provider == NULL) {
+        fprintf(stderr, "Context is not a provider-context\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    provname = OSSL_PROVIDER_get0_name(provider);
+    if (strcmp(provname, "ibmca") != 0) {
+        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
+               provname);
+        goto out;
+    }
+
+    nonce_type = 1;
+    params[0] = OSSL_PARAM_construct_uint(OSSL_SIGNATURE_PARAM_NONCE_TYPE,
+                                          &nonce_type);
+    params[1] = OSSL_PARAM_construct_end();
+    if (EVP_PKEY_CTX_set_params(ctx, params) == 0) {
+        fprintf(stderr, "EVP_PKEY_CTX_set_params (OSSL_SIGNATURE_PARAM_NONCE_TYPE) failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    if (EVP_DigestSignUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
+        fprintf(stderr, "EVP_DigestSignUpdate (1) failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    if (EVP_DigestSignUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
+        fprintf(stderr, "EVP_DigestSignUpdate (2) failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    siglen2 = sizeof(sigbuf2);
+    if (EVP_DigestSignFinal(md_ctx, sigbuf2, &siglen2) <= 0) {
+        fprintf(stderr, "EVP_DigestSignFinal failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    if (siglen != siglen2 ||
+        memcmp(sigbuf, sigbuf2, siglen) != 0) {
+        fprintf(stderr, "Deterministic signatures do not match\n");
+        ctx = NULL;
+        ret = 0;
+        goto out;
+    } else {
+        printf("Deterministic signature is correct\n");
+    }
+
+    EVP_MD_CTX_free(md_ctx);
+    md_ctx = NULL;
+    ctx = NULL;
+#endif
 
     /* Keygen with IBMCA provider (using ec_pkey as template) */
     ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "?provider=ibmca");
