@@ -48,7 +48,7 @@ int check_eckey(int nid, const char *name)
     unsigned char  sigbuf[1024];
     unsigned char  sigbuf2[1024];
     EVP_PKEY_CTX  *ctx = NULL;
-    EVP_PKEY      *ec_pkey = NULL;
+    EVP_PKEY      *ec_pkey = NULL, *ec_pkey2 = NULL;
     EVP_PKEY      *peer_pkey = NULL;
     size_t         keylen1, keylen2;
     unsigned char  keybuf1[512], keybuf2[512];
@@ -58,6 +58,7 @@ int check_eckey(int nid, const char *name)
     const char *provname;
     OSSL_PARAM params[2];
     unsigned int nonce_type;
+    const char dhkem_ikm[100] = { 0 };
 
     memset(digest, 0, sizeof(digest));
 
@@ -109,6 +110,71 @@ int check_eckey(int nid, const char *name)
     }
 
     EVP_PKEY_CTX_free(ctx);
+
+    /* Keygen using DHKEM with IBMCA provider */
+    switch (nid) {
+    case NID_X9_62_prime256v1:
+    case NID_secp384r1:
+    case NID_secp521r1:
+        ctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", "?provider=ibmca");
+        if (ctx == NULL) {
+            fprintf(stderr, "EVP_PKEY_CTX_new_from_name failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_keygen_init(ctx) <= 0) {
+            fprintf(stderr, "EVP_PKEY_keygen_init failed\n");
+            goto out;
+        }
+
+        provider = EVP_PKEY_CTX_get0_provider(ctx);
+        if (provider == NULL) {
+            fprintf(stderr, "Context is not a provider-context\n");
+            goto out;
+        }
+
+        provname = OSSL_PROVIDER_get0_name(provider);
+        if (strcmp(provname, "ibmca") != 0) {
+            fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
+                   provname);
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, nid) <= 0) {
+            if (ERR_GET_REASON(ERR_peek_last_error()) == 7) {
+                /* curve not supported => test passed */
+                fprintf(stderr, "Curve %s not supported by OpenSSL\n", name);
+                ret = 1;
+            } else {
+                fprintf(stderr, "EVP_PKEY_CTX_set_ec_paramgen_curve_nid failed\n");
+            }
+            goto out;
+        }
+
+        params[0] = OSSL_PARAM_construct_octet_string(OSSL_PKEY_PARAM_DHKEM_IKM,
+                                                      (void *)dhkem_ikm,
+                                                      sizeof(dhkem_ikm));
+        params[1] = OSSL_PARAM_construct_end();
+        if (EVP_PKEY_CTX_set_params(ctx, params) != 1) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_params failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_keygen(ctx, &ec_pkey2) <= 0) {
+            if (ERR_GET_REASON(ERR_peek_last_error()) == 7) {
+                /* curve not supported => test passed */
+                fprintf(stderr, "Curve %s not supported by OpenSSL\n", name);
+                ret = 1;
+            } else {
+                fprintf(stderr, "EVP_PKEY_keygen failed\n");
+            }
+            goto out;
+        }
+
+        EVP_PKEY_CTX_free(ctx);
+        EVP_PKEY_free(ec_pkey2);
+        break;
+    }
 
     /* Sign with IBMCA provider */
     ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "?provider=ibmca");
