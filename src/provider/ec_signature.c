@@ -109,6 +109,8 @@ static void ibmca_signature_ec_free_cb(struct ibmca_op_ctx *ctx)
     if (ctx->ec.signature.md_ctx != NULL)
         EVP_MD_CTX_free(ctx->ec.signature.md_ctx);
     ctx->ec.signature.md_ctx = NULL;
+
+    ctx->ec.signature.nonce_type = 0;
 }
 
 static int ibmca_signature_ec_dup_cb(const struct ibmca_op_ctx *ctx,
@@ -141,6 +143,8 @@ static int ibmca_signature_ec_dup_cb(const struct ibmca_op_ctx *ctx,
             return 0;
         }
     }
+
+    new_ctx->ec.signature.nonce_type = ctx->ec.signature.nonce_type;
 
     return 1;
 }
@@ -268,6 +272,10 @@ static int ibmca_signature_ec_sign_fallback(struct ibmca_op_ctx *ctx,
 {
     EVP_PKEY *pkey = NULL;
     EVP_PKEY_CTX *pctx = NULL;
+#ifdef OSSL_SIGNATURE_PARAM_NONCE_TYPE
+    OSSL_PARAM params[3];
+    const char *md_name;
+#endif
     int rc = 0;
 
     ibmca_debug_op_ctx(ctx, "ctx: %p key: %p tbslen: %lu sig: %p siglen: %lu",
@@ -295,6 +303,35 @@ static int ibmca_signature_ec_sign_fallback(struct ibmca_op_ctx *ctx,
         ibmca_debug_op_ctx(ctx, "ERROR: ibmca_check_fallback_provider failed");
         goto out;
     }
+
+#ifdef OSSL_SIGNATURE_PARAM_NONCE_TYPE
+    ibmca_debug_op_ctx(ctx, "nonce_type: %u", ctx->ec.signature.nonce_type);
+
+    if (ctx->ec.signature.nonce_type != 0) {
+        md_name = EVP_MD_get0_name(ctx->ec.signature.md);
+        if (md_name == NULL) {
+            put_error_op_ctx(ctx, IBMCA_ERR_INVALID_PARAM,
+                             "Digest must be set when using deterministic "
+                             "signatures");
+            goto out;
+        }
+
+        ibmca_debug_op_ctx(ctx, "md_name: %s", md_name);
+
+        params[0] = OSSL_PARAM_construct_utf8_string(
+                                              OSSL_SIGNATURE_PARAM_DIGEST,
+                                              (char *)md_name, strlen(md_name));
+        params[1] = OSSL_PARAM_construct_uint(OSSL_SIGNATURE_PARAM_NONCE_TYPE,
+                                              &ctx->ec.signature.nonce_type);
+        params[2] = OSSL_PARAM_construct_end();
+
+        if (EVP_PKEY_CTX_set_params(pctx, params) != 1) {
+            put_error_op_ctx(ctx, IBMCA_ERR_INTERNAL_ERROR,
+                             "EVP_PKEY_CTX_set_params failed");
+            goto out;
+        }
+    }
+#endif
 
     if (EVP_PKEY_sign(pctx, sig, siglen, tbs, tbslen) != 1) {
         put_error_op_ctx(ctx, IBMCA_ERR_INTERNAL_ERROR,
@@ -365,7 +402,7 @@ static int ibmca_signature_ec_sign(void *vctx,
         goto out;
     }
 
-    if (ctx->key->ec.fallback.d != NULL) {
+    if (ctx->key->ec.fallback.d != NULL || ctx->ec.signature.nonce_type != 0) {
         rc = ibmca_signature_ec_sign_fallback(ctx, sig, siglen, tbs, tbslen);
         if (rc != 1) {
             ibmca_debug_op_ctx(ctx,
@@ -701,7 +738,8 @@ static int ibmca_signature_ec_get_ctx_params(void *vctx,
 #ifdef OSSL_SIGNATURE_PARAM_NONCE_TYPE
     /* OSSL_SIGNATURE_PARAM_NONCE_TYPE */
     rc = ibmca_param_build_set_uint(ctx->provctx, NULL, params,
-                                    OSSL_SIGNATURE_PARAM_NONCE_TYPE, 0);
+                                    OSSL_SIGNATURE_PARAM_NONCE_TYPE,
+                                    ctx->ec.signature.nonce_type);
     if (rc == 0)
        return 0;
 #endif
@@ -716,9 +754,6 @@ static int ibmca_signature_ec_set_ctx_params(void *vctx,
     const OSSL_PARAM *p;
     const char *name, *props = NULL;
     size_t md_size;
-#ifdef OSSL_SIGNATURE_PARAM_NONCE_TYPE
-    unsigned int nonce_type;
-#endif
     int rc;
 
     if (ctx == NULL)
@@ -760,15 +795,10 @@ static int ibmca_signature_ec_set_ctx_params(void *vctx,
 #ifdef OSSL_SIGNATURE_PARAM_NONCE_TYPE
     /* OSSL_SIGNATURE_PARAM_NONCE_TYPE */
     rc = ibmca_param_get_uint(ctx->provctx, params,
-                              OSSL_SIGNATURE_PARAM_NONCE_TYPE, &nonce_type);
+                              OSSL_SIGNATURE_PARAM_NONCE_TYPE,
+                              &ctx->ec.signature.nonce_type);
     if (rc == 0)
         return 0;
-    /* Only allow nonce_type = 0 = random K */
-    if (nonce_type != 0) {
-        put_error_op_ctx(ctx, IBMCA_ERR_INVALID_PARAM,
-                         "Deterministic signature is not supported");
-        return 0;
-    }
 #endif
 
     return 1;
