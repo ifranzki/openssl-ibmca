@@ -233,6 +233,8 @@ struct ibmca_op_ctx {
                 int selection;
                 int curve_nid;
                 point_conversion_form_t format;
+                unsigned char *dhkem_ikm;
+                size_t dhkem_ikmlen;
             } gen; /* For operation EVP_PKEY_OP_KEYGEN */
             struct {
                 EVP_MD *md;
