@@ -425,6 +425,12 @@ static int check_eckey(int nid, const char *curvename)
     size_t         keylen1, keylen2;
     unsigned char  keybuf1[512], keybuf2[512];
     unsigned char  digest[32];
+#ifdef OSSL_SIGNATURE_PARAM_NONCE_TYPE
+    size_t         siglen2;
+    unsigned char  sigbuf2[1024];
+    OSSL_PARAM params[2];
+    unsigned int   nonce_type;
+#endif
 
     memset(digest, 0, sizeof(digest));
 
@@ -484,6 +490,34 @@ static int check_eckey(int nid, const char *curvename)
     if (!verify_digest("ibmca", curvename, ec_pkey, "SHA256",
                        digest, sizeof(digest), sigbuf, siglen))
         goto out;
+
+#ifdef OSSL_SIGNATURE_PARAM_NONCE_TYPE
+    nonce_type = 1;
+    params[0] = OSSL_PARAM_construct_uint(OSSL_SIGNATURE_PARAM_NONCE_TYPE,
+                                          &nonce_type);
+    params[1] = OSSL_PARAM_construct_end();
+
+    /* Digest-Sign using deterministic signature with default provider */
+    siglen = sizeof(sigbuf);
+    if (!sign_digest(NULL, ec_pkey, "SHA256", params,
+                     digest, sizeof(digest), sigbuf, &siglen))
+        goto out;
+
+    /* Digest-Sign using deterministic signature with IBMCA provider */
+    siglen2 = sizeof(sigbuf2);
+    if (!sign_digest("ibmca", ec_pkey, "SHA256", params,
+                     digest, sizeof(digest), sigbuf2, &siglen2))
+        goto out;
+
+    if (siglen != siglen2 ||
+        memcmp(sigbuf, sigbuf2, siglen) != 0) {
+        fprintf(stderr, "Deterministic signatures do not match\n");
+        ok = 0;
+        goto out;
+    } else {
+        printf("Deterministic signature is correct\n");
+    }
+#endif
 
     /* Keygen with IBMCA provider (using ec_pkey as template) */
     if (!generate_key("ibmca", nid, curvename, NULL, ec_pkey, &peer_pkey))
