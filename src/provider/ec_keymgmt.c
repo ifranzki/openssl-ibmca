@@ -898,6 +898,12 @@ static void ibmca_keymgmt_ec_gen_free_cb(struct ibmca_op_ctx *ctx)
 
     ctx->ec.gen.curve_nid = NID_undef;
     ctx->ec.gen.format = POINT_CONVERSION_UNCOMPRESSED;
+
+    if (ctx->ec.gen.dhkem_ikm != NULL)
+        P_CLEAR_FREE(ctx->provctx, ctx->ec.gen.dhkem_ikm,
+                    ctx->ec.gen.dhkem_ikmlen);
+    ctx->ec.gen.dhkem_ikm = NULL;
+    ctx->ec.gen.dhkem_ikmlen = 0;
 }
 
 static int ibmca_keymgmt_ec_gen_dup_cb(const struct ibmca_op_ctx *ctx,
@@ -910,6 +916,23 @@ static int ibmca_keymgmt_ec_gen_dup_cb(const struct ibmca_op_ctx *ctx,
 
     new_ctx->ec.gen.curve_nid = ctx->ec.gen.curve_nid;
     new_ctx->ec.gen.format = ctx->ec.gen.format;
+
+    if (ctx->ec.gen.dhkem_ikm != NULL)
+        P_CLEAR_FREE(ctx->provctx, ctx->ec.gen.dhkem_ikm,
+                    ctx->ec.gen.dhkem_ikmlen);
+    new_ctx->ec.gen.dhkem_ikm = NULL;
+    new_ctx->ec.gen.dhkem_ikmlen = 0;
+    if (ctx->ec.gen.dhkem_ikm != NULL) {
+        new_ctx->ec.gen.dhkem_ikm = P_MEMDUP(ctx->provctx,
+                                             ctx->ec.gen.dhkem_ikm,
+                                             ctx->ec.gen.dhkem_ikmlen);
+        if (new_ctx->ec.gen.dhkem_ikm == NULL) {
+            put_error_op_ctx(ctx, IBMCA_ERR_MALLOC_FAILED,
+                          "Failed to duplicate DHKEM-IKM buffer");
+            return 0;
+        }
+        new_ctx->ec.gen.dhkem_ikmlen = ctx->ec.gen.dhkem_ikmlen;
+    }
 
     return 1;
 }
@@ -993,9 +1016,11 @@ static int ibmca_keymgmt_ec_gen_set_params(void *vgenctx,
     struct ibmca_op_ctx *genctx = vgenctx;
     OSSL_PARAM grp_params[] = { OSSL_PARAM_END, OSSL_PARAM_END };
     const OSSL_PARAM *p;
+    unsigned char *ptr = NULL;
     const char *name;
     EC_GROUP *group;
     int rc, value;
+    size_t len = 0;
 
     if (genctx == NULL)
         return 0;
@@ -1081,11 +1106,17 @@ static int ibmca_keymgmt_ec_gen_set_params(void *vgenctx,
     }
 
 #ifdef OSSL_PKEY_PARAM_DHKEM_IKM
-    if (OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_DHKEM_IKM) != NULL) {
-        put_error_op_ctx(genctx, IBMCA_ERR_INVALID_PARAM,
-                         "EC parameter '%s' is not supported",
-                         OSSL_PKEY_PARAM_DHKEM_IKM);
+    rc = ibmca_param_get_octet_string(genctx->provctx, params,
+                                      OSSL_PKEY_PARAM_DHKEM_IKM,
+                                      (void **)&ptr, &len);
+    if (rc == 0)
         return 0;
+    if (rc > 0) {
+        if (genctx->ec.gen.dhkem_ikm != NULL)
+            P_CLEAR_FREE(genctx->provctx, genctx->ec.gen.dhkem_ikm,
+                         genctx->ec.gen.dhkem_ikmlen);
+        genctx->ec.gen.dhkem_ikm = ptr;
+        genctx->ec.gen.dhkem_ikmlen = len;
     }
 #endif
 
@@ -1125,6 +1156,7 @@ static int ibmca_keymgmt_ec_gen_fallback(struct ibmca_op_ctx *genctx,
     struct ibmca_keygen_cb_data cbdata;
     EVP_PKEY_CTX *pctx = NULL;
     EVP_PKEY *pkey = NULL;
+    OSSL_PARAM params[2];
     int rc = 0;
 
     ibmca_debug_op_ctx(genctx, "genctx: %p", genctx);
@@ -1153,6 +1185,22 @@ static int ibmca_keymgmt_ec_gen_fallback(struct ibmca_op_ctx *genctx,
                      "EVP_PKEY_CTX_set_ec_paramgen_curve_nid failed");
         goto out;
     }
+
+#ifdef OSSL_PKEY_PARAM_DHKEM_IKM
+    if (genctx->ec.gen.dhkem_ikm != NULL && genctx->ec.gen.dhkem_ikmlen > 0) {
+        params[0] = OSSL_PARAM_construct_octet_string(
+                                                OSSL_PKEY_PARAM_DHKEM_IKM,
+                                                genctx->ec.gen.dhkem_ikm,
+                                                genctx->ec.gen.dhkem_ikmlen);
+        params[1] = OSSL_PARAM_construct_end();
+
+        if (EVP_PKEY_CTX_set_params(pctx, params) != 1) {
+            put_error_op_ctx(genctx, IBMCA_ERR_INTERNAL_ERROR,
+                             "EVP_PKEY_CTX_set_params failed");
+            goto out;
+        }
+    }
+#endif
 
     if (osslcb != NULL) {
         cbdata.osslcb = osslcb;
@@ -1236,6 +1284,14 @@ static void *ibmca_keymgmt_ec_gen(void *vgenctx, OSSL_CALLBACK *osslcb,
 
     if ((genctx->ec.gen.selection & OSSL_KEYMGMT_SELECT_KEYPAIR) == 0)
         goto out;
+
+    ibmca_debug_op_ctx(genctx, "dhkem_ikm: %p", genctx->ec.gen.dhkem_ikm);
+    ibmca_debug_op_ctx(genctx, "dhkem_ikmlen: %u", genctx->ec.gen.dhkem_ikmlen);
+
+    if (genctx->ec.gen.dhkem_ikm != NULL && genctx->ec.gen.dhkem_ikmlen > 0) {
+        ibmca_debug_op_ctx(genctx, "DHKEM-IKM is set, force use of fallback");
+        fallback = true;
+    }
 
     key->ec.key = ica_ec_key_new(key->ec.curve_nid, &privlen);
     if (key->ec.key == NULL || key->ec.prime_size != privlen) {
