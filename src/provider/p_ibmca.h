@@ -239,6 +239,7 @@ struct ibmca_op_ctx {
                 bool set_md_allowed;
                 size_t md_size;
                 EVP_MD_CTX *md_ctx;
+                unsigned int nonce_type;
             } signature; /* For operation EVP_PKEY_OP_SIGN/VERIFY */
             struct {
                 struct ibmca_key *peer_key;
