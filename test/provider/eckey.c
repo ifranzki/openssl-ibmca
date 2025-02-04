@@ -65,6 +65,9 @@ int check_eckey(int nid, const char *name)
     EVP_PKEY      *ec_pkey1 = NULL, *ec_pkey2 = NULL;
     const char    dhkem_ikm[100] = { 0 };
 #endif
+#ifdef EVP_PKEY_OP_SIGNMSG
+    EVP_SIGNATURE *alg;
+#endif
 
     memset(digest, 0, sizeof(digest));
 
@@ -818,6 +821,479 @@ int check_eckey(int nid, const char *name)
     ctx = NULL;
 #endif
 
+#ifdef EVP_PKEY_OP_SIGNMSG
+    /* SignMessage with IBMCA provider */
+    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "?provider=ibmca");
+    if (ctx == NULL) {
+        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+        goto out;
+    }
+
+    alg = EVP_SIGNATURE_fetch(NULL, "ECDSA-SHA256", "?provider=ibmca");
+    if (alg == NULL) {
+        fprintf(stderr, "EVP_SIGNATURE_fetch for ECDSA-SHA256 failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_sign_message_init(ctx, alg, NULL) <= 0) {
+        fprintf(stderr, "EVP_PKEY_sign_message_init failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    provider = EVP_PKEY_CTX_get0_provider(ctx);
+    if (provider == NULL) {
+        fprintf(stderr, "Context is not a provider-context\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    provname = OSSL_PROVIDER_get0_name(provider);
+    if (strcmp(provname, "ibmca") != 0) {
+        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
+               provname);
+        goto out;
+    }
+
+    if (EVP_PKEY_sign_message_update(ctx, digest, sizeof(digest)) <= 0) {
+        fprintf(stderr, "EVP_PKEY_sign_message_update (1) failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    if (EVP_PKEY_sign_message_update(ctx, digest, sizeof(digest)) <= 0) {
+        fprintf(stderr, "EVP_PKEY_sign_message_update (2) failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    siglen = sizeof(sigbuf);
+    if (EVP_PKEY_sign_message_final(ctx, sigbuf, &siglen) <= 0) {
+        fprintf(stderr, "EVP_PKEY_sign_message_final failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    EVP_SIGNATURE_free(alg);
+    alg = NULL;
+    EVP_PKEY_CTX_free(ctx);
+    ctx = NULL;
+
+    /* VerifyMessage with default provider */
+    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "provider=default");
+    if (ctx == NULL) {
+        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+        goto out;
+    }
+
+    alg = EVP_SIGNATURE_fetch(NULL, "ECDSA-SHA256", "provider=default");
+    if (alg == NULL) {
+        fprintf(stderr, "EVP_SIGNATURE_fetch for ECDSA-SHA256 failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_verify_message_init(ctx, alg, NULL) <= 0) {
+        fprintf(stderr, "EVP_PKEY_verify_message_init failed\n");
+        goto out;
+    }
+
+    provider = EVP_PKEY_CTX_get0_provider(ctx);
+    if (provider == NULL) {
+        fprintf(stderr, "Context is not a provider-context\n");
+        goto out;
+    }
+
+    provname = OSSL_PROVIDER_get0_name(provider);
+    if (strcmp(provname, "default") != 0) {
+        fprintf(stderr, "Context is not using the default provider, but '%s'\n",
+               provname);
+        goto out;
+    }
+
+    if (EVP_PKEY_verify_message_update(ctx, digest, sizeof(digest)) <= 0) {
+        fprintf(stderr, "EVP_PKEY_verify_message_update (1) failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_verify_message_update(ctx, digest, sizeof(digest)) <= 0) {
+        fprintf(stderr, "EVP_PKEY_verify_message_update (2) failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_CTX_set_signature(ctx, sigbuf, siglen) != 1) {
+        fprintf(stderr, "EVP_PKEY_CTX_set_signature (2) failed\n");
+        goto out;
+    }
+
+    ret = EVP_PKEY_verify_message_final(ctx);
+    if (ret == -1) {
+        /* error */
+        fprintf(stderr, "Failed to verify-message signature with %s "
+                "(default provider)\n", name);
+        goto out;
+    } else if (ret == 0) {
+        /* incorrect signature */
+        fprintf(stderr, "Signature-Message incorrect with %s "
+                "(default provider)\n", name);
+        goto out;
+    } else {
+        /* signature ok */
+        printf("Signature-Message correct with %s (default provider)\n",
+                name);
+        ret = 0;
+    }
+
+    EVP_SIGNATURE_free(alg);
+    alg = NULL;
+    EVP_PKEY_CTX_free(ctx);
+    ctx = NULL;
+
+    /* VerifyMessage with IBMCA provider */
+    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "?provider=ibmca");
+    if (ctx == NULL) {
+        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+        goto out;
+    }
+
+    alg = EVP_SIGNATURE_fetch(NULL, "ECDSA-SHA256", "?provider=ibmca");
+    if (alg == NULL) {
+        fprintf(stderr, "EVP_SIGNATURE_fetch for ECDSA-SHA256 failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_verify_message_init(ctx, alg, NULL) <= 0) {
+        fprintf(stderr, "EVP_PKEY_verify_message_init failed\n");
+        goto out;
+    }
+
+    provider = EVP_PKEY_CTX_get0_provider(ctx);
+    if (provider == NULL) {
+        fprintf(stderr, "Context is not a provider-context\n");
+        goto out;
+    }
+
+    provname = OSSL_PROVIDER_get0_name(provider);
+    if (strcmp(provname, "ibmca") != 0) {
+        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
+               provname);
+        goto out;
+    }
+
+    if (EVP_PKEY_verify_message_update(ctx, digest, sizeof(digest)) <= 0) {
+        fprintf(stderr, "EVP_PKEY_verify_message_update (1) failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_verify_message_update(ctx, digest, sizeof(digest)) <= 0) {
+        fprintf(stderr, "EVP_PKEY_verify_message_update (2) failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_CTX_set_signature(ctx, sigbuf, siglen) != 1) {
+        fprintf(stderr, "EVP_PKEY_CTX_set_signature (2) failed\n");
+        goto out;
+    }
+
+    ret = EVP_PKEY_verify_message_final(ctx);
+    if (ret == -1) {
+        /* error */
+        fprintf(stderr, "Failed to verify-message signature with %s "
+                "(IBMCA provider)\n", name);
+        goto out;
+    } else if (ret == 0) {
+        /* incorrect signature */
+        fprintf(stderr, "Signature-Message incorrect with %s "
+                "(IBMCA provider)\n", name);
+        goto out;
+    } else {
+        /* signature ok */
+        printf("Signature-Message correct with %s (IBMCA provider)\n",
+                name);
+        ret = 0;
+    }
+
+    EVP_SIGNATURE_free(alg);
+    alg = NULL;
+    EVP_PKEY_CTX_free(ctx);
+    ctx = NULL;
+
+    /* SignMessage with default provider */
+    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "provider=default");
+    if (ctx == NULL) {
+        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+        goto out;
+    }
+
+    alg = EVP_SIGNATURE_fetch(NULL, "ECDSA-SHA256", "provider=default");
+    if (alg == NULL) {
+        fprintf(stderr, "EVP_SIGNATURE_fetch for ECDSA-SHA256 failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_sign_message_init(ctx, alg, NULL) <= 0) {
+        fprintf(stderr, "EVP_PKEY_sign_message_init failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    provider = EVP_PKEY_CTX_get0_provider(ctx);
+    if (provider == NULL) {
+        fprintf(stderr, "Context is not a provider-context\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    provname = OSSL_PROVIDER_get0_name(provider);
+    if (strcmp(provname, "default") != 0) {
+        fprintf(stderr, "Context is not using the default provider, but '%s'\n",
+               provname);
+        goto out;
+    }
+
+    if (EVP_PKEY_sign_message_update(ctx, digest, sizeof(digest)) <= 0) {
+        fprintf(stderr, "EVP_PKEY_sign_message_update (1) failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    if (EVP_PKEY_sign_message_update(ctx, digest, sizeof(digest)) <= 0) {
+        fprintf(stderr, "EVP_PKEY_sign_message_update (2) failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    siglen = sizeof(sigbuf);
+    if (EVP_PKEY_sign_message_final(ctx, sigbuf, &siglen) <= 0) {
+        fprintf(stderr, "EVP_PKEY_sign_message_final failed\n");
+        ctx = NULL;
+        goto out;
+    }
+
+    EVP_SIGNATURE_free(alg);
+    alg = NULL;
+    EVP_PKEY_CTX_free(ctx);
+    ctx = NULL;
+
+    /* VerifyMessage with IBMCA provider */
+    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "?provider=ibmca");
+    if (ctx == NULL) {
+        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+        goto out;
+    }
+
+    alg = EVP_SIGNATURE_fetch(NULL, "ECDSA-SHA256", "?provider=ibmca");
+    if (alg == NULL) {
+        fprintf(stderr, "EVP_SIGNATURE_fetch for ECDSA-SHA256 failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_verify_message_init(ctx, alg, NULL) <= 0) {
+        fprintf(stderr, "EVP_PKEY_verify_message_init failed\n");
+        goto out;
+    }
+
+    provider = EVP_PKEY_CTX_get0_provider(ctx);
+    if (provider == NULL) {
+        fprintf(stderr, "Context is not a provider-context\n");
+        goto out;
+    }
+
+    provname = OSSL_PROVIDER_get0_name(provider);
+    if (strcmp(provname, "ibmca") != 0) {
+        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
+               provname);
+        goto out;
+    }
+
+    if (EVP_PKEY_verify_message_update(ctx, digest, sizeof(digest)) <= 0) {
+        fprintf(stderr, "EVP_PKEY_verify_message_update (1) failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_verify_message_update(ctx, digest, sizeof(digest)) <= 0) {
+        fprintf(stderr, "EVP_PKEY_verify_message_update (2) failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_CTX_set_signature(ctx, sigbuf, siglen) != 1) {
+        fprintf(stderr, "EVP_PKEY_CTX_set_signature (2) failed\n");
+        goto out;
+    }
+
+    ret = EVP_PKEY_verify_message_final(ctx);
+    if (ret == -1) {
+        /* error */
+        fprintf(stderr, "Failed to verify-message signature with %s "
+                "(IBMCA provider)\n", name);
+        goto out;
+    } else if (ret == 0) {
+        /* incorrect signature */
+        fprintf(stderr, "Signature-Message incorrect with %s "
+                "(IBMCA provider)\n", name);
+        goto out;
+    } else {
+        /* signature ok */
+        printf("Signature-Message correct with %s (IBMCA provider)\n",
+                name);
+        ret = 0;
+    }
+
+    EVP_SIGNATURE_free(alg);
+    alg = NULL;
+    EVP_PKEY_CTX_free(ctx);
+    ctx = NULL;
+
+    /* Sign pre-hashed message with IBMCA provider */
+    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "?provider=ibmca");
+    if (ctx == NULL) {
+        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+        goto out;
+    }
+
+    alg = EVP_SIGNATURE_fetch(NULL, "ECDSA-SHA256", "?provider=ibmca");
+    if (alg == NULL) {
+        fprintf(stderr, "EVP_SIGNATURE_fetch for ECDSA-SHA256 failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_sign_init_ex2(ctx, alg, NULL) <= 0) {
+        fprintf(stderr, "EVP_PKEY_sign_init_ex2 failed\n");
+        goto out;
+    }
+
+    provider = EVP_PKEY_CTX_get0_provider(ctx);
+    if (provider == NULL) {
+        fprintf(stderr, "Context is not a provider-context\n");
+        goto out;
+    }
+
+    provname = OSSL_PROVIDER_get0_name(provider);
+    if (strcmp(provname, "ibmca") != 0) {
+        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
+               provname);
+        goto out;
+    }
+
+    siglen = sizeof(sigbuf);
+    if (EVP_PKEY_sign(ctx, sigbuf, &siglen, digest, sizeof(digest)) <= 0) {
+        fprintf(stderr, "EVP_PKEY_sign failed\n");
+        goto out;
+    }
+
+    EVP_SIGNATURE_free(alg);
+    alg = NULL;
+    EVP_PKEY_CTX_free(ctx);
+    ctx = NULL;
+
+    /* Verify pre-hashed message with default provider */
+    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "provider=default");
+    if (ctx == NULL) {
+        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+        goto out;
+    }
+
+    alg = EVP_SIGNATURE_fetch(NULL, "ECDSA-SHA256", "provider=default");
+    if (alg == NULL) {
+        fprintf(stderr, "EVP_SIGNATURE_fetch for ECDSA-SHA256 failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_verify_init_ex2(ctx, alg, NULL) <= 0) {
+        fprintf(stderr, "EVP_PKEY_verify_init_ex2 failed\n");
+        goto out;
+    }
+
+    provider = EVP_PKEY_CTX_get0_provider(ctx);
+    if (provider == NULL) {
+        fprintf(stderr, "Context is not a provider-context\n");
+        goto out;
+    }
+
+    provname = OSSL_PROVIDER_get0_name(provider);
+    if (strcmp(provname, "default") != 0) {
+        fprintf(stderr, "Context is not using the default provider, but '%s'\n",
+               provname);
+        goto out;
+    }
+
+    ret = EVP_PKEY_verify(ctx, sigbuf, siglen, digest, sizeof(digest));
+    if (ret == -1) {
+        /* error */
+        fprintf(stderr, "Failed to verify signature of pre-hashed message "
+                "with %s (default provider)\n", name);
+        goto out;
+    } else if (ret == 0) {
+        /* incorrect signature */
+        fprintf(stderr, "Signature of pre-hashed message incorrect with %s "
+                "(default provider)\n", name);
+        goto out;
+    } else {
+        /* signature ok */
+        printf("Signature of pre-hashed message correct with %s "
+               "(default provider)\n", name);
+        ret = 0;
+    }
+
+    EVP_SIGNATURE_free(alg);
+    alg = NULL;
+    EVP_PKEY_CTX_free(ctx);
+    ctx = NULL;
+
+    /* Verify pre-hashed message with IBMCA provider */
+    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "?provider=ibmca");
+    if (ctx == NULL) {
+        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+        goto out;
+    }
+
+    alg = EVP_SIGNATURE_fetch(NULL, "ECDSA-SHA256", "?provider=ibmca");
+    if (alg == NULL) {
+        fprintf(stderr, "EVP_SIGNATURE_fetch for ECDSA-SHA256 failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_verify_init_ex2(ctx, alg, NULL) <= 0) {
+        fprintf(stderr, "EVP_PKEY_verify_init failed\n");
+        goto out;
+    }
+
+    provider = EVP_PKEY_CTX_get0_provider(ctx);
+    if (provider == NULL) {
+        fprintf(stderr, "Context is not a provider-context\n");
+        goto out;
+    }
+
+    provname = OSSL_PROVIDER_get0_name(provider);
+    if (strcmp(provname, "ibmca") != 0) {
+        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
+               provname);
+        goto out;
+    }
+
+    ret = EVP_PKEY_verify(ctx, sigbuf, siglen, digest, sizeof(digest));
+    if (ret == -1) {
+        /* error */
+        fprintf(stderr, "Failed to verify signature of pre-hashed message "
+                "with %s (ibmca provider)\n", name);
+        goto out;
+    } else if (ret == 0) {
+        /* incorrect signature */
+        fprintf(stderr, "Signature of pre-hashed message incorrect with %s "
+                "(ibmca provider)\n", name);
+        goto out;
+    } else {
+        /* signature ok */
+        printf("Signature of pre-hashed message correct with %s "
+               "(ibmca provider)\n", name);
+        ret = 0;
+    }
+
+    EVP_SIGNATURE_free(alg);
+    alg = NULL;
+    EVP_PKEY_CTX_free(ctx);
+    ctx = NULL;
+#endif
+
     /* Keygen with IBMCA provider (using ec_pkey as template) */
     ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "?provider=ibmca");
     if (ctx == NULL) {
@@ -1067,6 +1543,10 @@ int check_eckey(int nid, const char *name)
        EVP_PKEY_CTX_free(ctx);
     if (md_ctx)
         EVP_MD_CTX_free(md_ctx);
+#ifdef EVP_PKEY_OP_SIGNMSG
+    if (alg)
+        EVP_SIGNATURE_free(alg);
+#endif
 
     ERR_print_errors_fp(stderr);
 
