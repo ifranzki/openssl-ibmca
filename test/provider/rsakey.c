@@ -721,8 +721,8 @@ int check_rsakey(int bits, const char *algo, const char *name)
     ctx = NULL;
 
 #ifdef EVP_PKEY_OP_SIGNMSG
-    if (strcmp(algo, "RSA-PSS") == 0)
-        goto skip;
+//    if (strcmp(algo, "RSA-PSS") == 0)
+//        goto skip;
 
     /* Digest-SignMessage with IBMCA provider */
     ctx = EVP_PKEY_CTX_new_from_pkey(NULL, rsa_pkey, "?provider=ibmca");
@@ -755,6 +755,24 @@ int check_rsakey(int bits, const char *algo, const char *name)
         fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
                provname);
         goto out;
+    }
+
+    if (strcmp(algo, "RSA-PSS") == 0) {
+        if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, "SHA256",
+                                              "provider=default") <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, 24) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
+            goto out;
+        }
     }
 
     if (EVP_PKEY_sign_message_update(ctx, digest, sizeof(digest)) <= 0) {
@@ -810,6 +828,24 @@ int check_rsakey(int bits, const char *algo, const char *name)
         fprintf(stderr, "Context is not using the default provider, but '%s'\n",
                provname);
         goto out;
+    }
+
+    if (strcmp(algo, "RSA-PSS") == 0) {
+        if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, "SHA256",
+                                              "provider=default") <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, 24) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
+            goto out;
+        }
     }
 
     if (EVP_PKEY_verify_message_update(ctx, digest, sizeof(digest)) <= 0) {
@@ -879,6 +915,24 @@ int check_rsakey(int bits, const char *algo, const char *name)
         fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
                provname);
         goto out;
+    }
+
+    if (strcmp(algo, "RSA-PSS") == 0) {
+        if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, "SHA256",
+                                              "provider=default") <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, 24) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
+            goto out;
+        }
     }
 
     if (EVP_PKEY_verify_message_update(ctx, digest, sizeof(digest)) <= 0) {
@@ -952,6 +1006,24 @@ int check_rsakey(int bits, const char *algo, const char *name)
         goto out;
     }
 
+    if (strcmp(algo, "RSA-PSS") == 0) {
+        if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, "SHA256",
+                                              "provider=default") <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, 24) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
+            goto out;
+        }
+    }
+
     if (EVP_PKEY_sign_message_update(ctx, digest, sizeof(digest)) <= 0) {
         fprintf(stderr, "EVP_PKEY_sign_message_update (1) failed\n");
         ctx = NULL;
@@ -1005,6 +1077,24 @@ int check_rsakey(int bits, const char *algo, const char *name)
         fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
                provname);
         goto out;
+    }
+
+    if (strcmp(algo, "RSA-PSS") == 0) {
+        if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, "SHA256",
+                                              "provider=default") <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, 24) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
+            goto out;
+        }
     }
 
     if (EVP_PKEY_verify_message_update(ctx, digest, sizeof(digest)) <= 0) {
@@ -1076,6 +1166,24 @@ int check_rsakey(int bits, const char *algo, const char *name)
         goto out;
     }
 
+    if (strcmp(algo, "RSA-PSS") == 0) {
+        if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, "SHA256",
+                                              "provider=default") <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, 24) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
+            goto out;
+        }
+    }
+
     siglen = sizeof(sigbuf);
     if (EVP_PKEY_sign(ctx, sigbuf, &siglen, digest, sizeof(digest)) <= 0) {
         fprintf(stderr, "EVP_PKEY_sign failed\n");
@@ -1116,6 +1224,24 @@ int check_rsakey(int bits, const char *algo, const char *name)
         fprintf(stderr, "Context is not using the default provider, but '%s'\n",
                provname);
         goto out;
+    }
+
+    if (strcmp(algo, "RSA-PSS") == 0) {
+        if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, "SHA256",
+                                              "provider=default") <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, 24) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
+            goto out;
+        }
     }
 
     ret = EVP_PKEY_verify(ctx, sigbuf, siglen, digest, sizeof(digest));
@@ -1172,6 +1298,24 @@ int check_rsakey(int bits, const char *algo, const char *name)
         goto out;
     }
 
+    if (strcmp(algo, "RSA-PSS") == 0) {
+        if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, "SHA256",
+                                              "provider=default") <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, 24) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
+            goto out;
+        }
+    }
+
     ret = EVP_PKEY_verify(ctx, sigbuf, siglen, digest, sizeof(digest));
     if (ret == -1) {
         /* error */
@@ -1196,7 +1340,7 @@ int check_rsakey(int bits, const char *algo, const char *name)
     ctx = NULL;
 
 
-skip:
+//skip:
 #endif
 
     ret = 1;

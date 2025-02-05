@@ -84,7 +84,7 @@ static const struct ibmca_pss_params ibmca_rsa_pss_defaults =
                                             IBMCA_RSA_PSS_DEFAULTS;
 
 #ifdef EVP_PKEY_OP_SIGNMSG
-static const char *ibmca_siganure_rsa_keytypes[] = { "RSA", NULL };
+static const char *ibmca_siganure_rsa_keytypes[] = { "RSA", "RSASSA-PSS", NULL };
 
 static const char **ibmca_signature_rsa_query_key_types(void)
 {
@@ -1676,9 +1676,6 @@ static int ibmca_signature_rsa_set_ctx_params(void *vctx,
             ctx->rsa.signature.signature = ptr;
             ctx->rsa.signature.signature_len = len;
         }
-
-        /* No further params are allowed */
-        return 1;
     }
 #endif
 
@@ -1730,8 +1727,10 @@ static int ibmca_signature_rsa_set_ctx_params(void *vctx,
         case RSA_PKCS1_PSS_PADDING:
             if (ctx->operation != EVP_PKEY_OP_SIGN &&
                 ctx->operation != EVP_PKEY_OP_SIGNCTX &&
+                ctx->operation != EVP_PKEY_OP_SIGNMSG &&
                 ctx->operation != EVP_PKEY_OP_VERIFY &&
-                ctx->operation != EVP_PKEY_OP_VERIFYCTX) {
+                ctx->operation != EVP_PKEY_OP_VERIFYCTX &&
+                ctx->operation != EVP_PKEY_OP_VERIFYMSG) {
                 put_error_op_ctx(ctx, IBMCA_ERR_INVALID_PARAM,
                                  "PSS padding only allowed for sign and verify operations");
                 return 0;
@@ -1922,6 +1921,10 @@ static const OSSL_PARAM ibmca_signature_rsa_settable_params_no_digest[] = {
 
 #ifdef EVP_PKEY_OP_SIGNMSG
 static const OSSL_PARAM ibmca_signature_rsa_sigalg_settable_params[] = {
+    OSSL_PARAM_utf8_string(OSSL_SIGNATURE_PARAM_PAD_MODE, NULL, 0),
+    OSSL_PARAM_utf8_string(OSSL_SIGNATURE_PARAM_MGF1_DIGEST, NULL, 0),
+    OSSL_PARAM_utf8_string(OSSL_SIGNATURE_PARAM_MGF1_PROPERTIES, NULL, 0),
+    OSSL_PARAM_utf8_string(OSSL_SIGNATURE_PARAM_PSS_SALTLEN, NULL, 0),
     OSSL_PARAM_octet_string(OSSL_SIGNATURE_PARAM_SIGNATURE, NULL, 0),
     OSSL_PARAM_END
 };
@@ -1940,7 +1943,7 @@ static const OSSL_PARAM *ibmca_signature_rsa_settable_ctx_params(
     if (ctx != NULL && ctx->operation == EVP_PKEY_OP_VERIFYMSG)
         params = ibmca_signature_rsa_sigalg_settable_params;
     else if (ctx != NULL && ctx->operation == EVP_PKEY_OP_SIGNMSG)
-        params = NULL;
+        params = ibmca_signature_rsa_settable_params_no_digest;
     else if (ctx == NULL || ctx->rsa.signature.set_md_allowed)
 #else
     if (ctx == NULL || ctx->rsa.signature.set_md_allowed)
