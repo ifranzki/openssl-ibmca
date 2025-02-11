@@ -33,8 +33,7 @@
 /* This is just a random number of threads to stimulate provider configuration. */
 #define DEFAULT_MAX_THREADS 20
 
-
-void setup(void)
+static void setup(void)
 {
     OPENSSL_load_builtin_modules();
 
