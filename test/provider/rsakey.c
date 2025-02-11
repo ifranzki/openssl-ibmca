@@ -31,7 +31,7 @@
 
 #define UNUSED(var)                             ((void)(var))
 
-void setup(void)
+static void setup(void)
 {
     OPENSSL_load_builtin_modules();
 
@@ -40,22 +40,97 @@ void setup(void)
                            CONF_MFLAGS_IGNORE_MISSING_FILE);
 }
 
-int check_rsakey(int bits, const char *algo, const char *name)
+static int check_provider(EVP_PKEY_CTX *ctx, const char *expected_provider)
 {
-    int            ret = 0;
-    size_t         siglen;
-    unsigned char  sigbuf[1024];
-    EVP_PKEY_CTX   *ctx = NULL;
-    EVP_PKEY       *rsa_pkey = NULL;
-    EVP_MD_CTX     *md_ctx = NULL;
-    unsigned char  digest[32];
     const OSSL_PROVIDER *provider;
     const char *provname;
 
-    memset(digest, 0, sizeof(digest));
+    if (expected_provider == NULL)
+        expected_provider = "default";
 
-    /* Keygen with IBMCA provider */
-    ctx = EVP_PKEY_CTX_new_from_name(NULL, algo, "?provider=ibmca");
+    provider = EVP_PKEY_CTX_get0_provider(ctx);
+    if (provider == NULL) {
+        fprintf(stderr, "Context is not a provider-context\n");
+        return 0;
+    }
+
+    provname = OSSL_PROVIDER_get0_name(provider);
+    if (strcmp(provname, expected_provider) != 0) {
+        fprintf(stderr, "Context is not using the %s provider, but '%s'\n",
+                expected_provider, provname);
+        return 0;
+    }
+
+    return 1;
+}
+
+static int set_rsa_pss_keygen_params(EVP_PKEY_CTX *ctx, const char *pss_md,
+                                     const char *pss_mgf1_md, int pss_saltlen)
+{
+    if (pss_md != NULL) {
+        if (EVP_PKEY_CTX_set_rsa_pss_keygen_md_name(ctx, pss_md, NULL) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_keygen_md_name failed\n");
+            return 0;
+        }
+    }
+
+    if (pss_mgf1_md != NULL) {
+        if (EVP_PKEY_CTX_set_rsa_pss_keygen_mgf1_md_name(ctx, pss_mgf1_md) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_keygen_mgf1_md_name failed\n");
+            return 0;
+        }
+    }
+
+    if (pss_saltlen != 0) {
+        if (EVP_PKEY_CTX_set_rsa_pss_keygen_saltlen(ctx, pss_saltlen) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_keygen_saltlen failed\n");
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int set_rsa_pss_params(EVP_PKEY_CTX *ctx, int padding,
+                              const char *pss_mgf1_md, int pss_saltlen)
+{
+    if (padding != 0) {
+        if (EVP_PKEY_CTX_set_rsa_padding(ctx, padding) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
+            return 0;
+        }
+    }
+
+    if (pss_mgf1_md != NULL) {
+        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, pss_mgf1_md, NULL) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
+            return 0;
+        }
+    }
+
+    if (pss_saltlen != 0) {
+        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, pss_saltlen) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int generate_key(const char* provider, const char *algo, int bits,
+                        const char *pss_md, const char *pss_mgf1_md,
+                        int pss_saltlen, const OSSL_PARAM *params,
+                        EVP_PKEY **rsa_pkey)
+{
+    char props[200];
+    EVP_PKEY_CTX *ctx = NULL;
+    int ok = 0;
+
+    sprintf(props, "%sprovider=%s", provider != NULL ? "?" : "",
+            provider != NULL ? provider : "default");
+
+    ctx = EVP_PKEY_CTX_new_from_name(NULL, algo, props);
     if (ctx == NULL) {
         fprintf(stderr, "EVP_PKEY_CTX_new_from_name failed\n");
         goto out;
@@ -66,51 +141,51 @@ int check_rsakey(int bits, const char *algo, const char *name)
         goto out;
     }
 
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
+    if (!check_provider(ctx, provider))
         goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
 
     if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, bits) <= 0) {
         fprintf(stderr, "EVP_PKEY_CTX_set_rsa_keygen_bits failed\n");
         goto out;
     }
 
-    if (strcmp(algo, "RSA-PSS") == 0) {
-        /* generate a PSS restricted RSA-PSS key */
-        if (EVP_PKEY_CTX_set_rsa_pss_keygen_md_name(ctx, "SHA256", NULL) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_keygen_md_name failed\n");
-            goto out;
-        }
+    if (!set_rsa_pss_keygen_params(ctx, pss_md, pss_mgf1_md, pss_saltlen))
+        goto out;
 
-        if (EVP_PKEY_CTX_set_rsa_pss_keygen_mgf1_md_name(ctx, "SHA256") <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_keygen_mgf1_md_name failed\n");
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_pss_keygen_saltlen(ctx, 24) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_keygen_saltlen failed\n");
+    if (params != NULL) {
+        if (EVP_PKEY_CTX_set_params(ctx, params) != 1) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_params failed\n");
             goto out;
         }
     }
 
-    if (EVP_PKEY_keygen(ctx, &rsa_pkey) <= 0) {
+    if (EVP_PKEY_keygen(ctx, rsa_pkey) <= 0) {
         fprintf(stderr, "EVP_PKEY_keygen failed\n");
         goto out;
     }
 
-    EVP_PKEY_CTX_free(ctx);
+    ok = 1;
 
-    /* Sign with IBMCA provider */
-    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, rsa_pkey, "?provider=ibmca");
+out:
+    if (ctx != NULL)
+        EVP_PKEY_CTX_free(ctx);
+
+    return ok;
+}
+
+static int sign_single(const char* provider, EVP_PKEY *rsa_pkey,
+                       int pss_padding, const char *pss_mgf1_md,
+                       int pss_saltlen, const unsigned char *tbs,
+                       size_t tbs_len, unsigned char *sig, size_t *sig_len)
+{
+    char props[200];
+    EVP_PKEY_CTX *ctx = NULL;
+    int ok = 0;
+
+    sprintf(props, "%sprovider=%s", provider != NULL ? "?" : "",
+            provider != NULL ? provider : "default");
+
+    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, rsa_pkey, props);
     if (ctx == NULL) {
         fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
         goto out;
@@ -121,615 +196,296 @@ int check_rsakey(int bits, const char *algo, const char *name)
         goto out;
     }
 
-    if (strcmp(algo, "RSA-PSS") == 0) {
-        if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, "SHA256",
-                                              "?provider=ibmca") <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, 24) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
-            goto out;
-        }
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
+    if (!check_provider(ctx, provider))
         goto out;
-    }
 
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
+    if (!set_rsa_pss_params(ctx, pss_padding, pss_mgf1_md, pss_saltlen))
         goto out;
-    }
 
-    siglen = sizeof(sigbuf);
-    if (EVP_PKEY_sign(ctx, sigbuf, &siglen, digest, sizeof(digest)) <= 0) {
+    if (EVP_PKEY_sign(ctx, sig, sig_len, tbs, tbs_len) <= 0) {
         fprintf(stderr, "EVP_PKEY_sign failed\n");
         goto out;
     }
 
-    EVP_PKEY_CTX_free(ctx);
+    ok = 1;
+
+out:
+    if (ctx != NULL)
+        EVP_PKEY_CTX_free(ctx);
+
+    return ok;
+}
+
+static int verify_single(const char* provider, const char *algo,
+                         EVP_PKEY *rsa_pkey, int pss_padding,
+                         const char *pss_mgf1_md, int pss_saltlen,
+                         const unsigned char *tbs, size_t tbs_len,
+                         const unsigned char *sig, size_t sig_len)
+{
+    char props[200];
+    EVP_PKEY_CTX *ctx = NULL;
+    int ok = 0;
+
+    sprintf(props, "%sprovider=%s", provider != NULL ? "?" : "",
+            provider != NULL ? provider : "default");
+
+    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, rsa_pkey, props);
+    if (ctx == NULL) {
+        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_verify_init(ctx) <= 0) {
+        fprintf(stderr, "EVP_PKEY_verify_init failed\n");
+        goto out;
+    }
+
+    if (!check_provider(ctx, provider))
+        goto out;
+
+    if (!set_rsa_pss_params(ctx, pss_padding, pss_mgf1_md, pss_saltlen))
+        goto out;
+
+    ok = EVP_PKEY_verify(ctx, sig, sig_len, tbs, tbs_len);
+    if (ok == -1) {
+        /* error */
+        fprintf(stderr, "Failed to verify signature with %s (%s provider)\n",
+                algo, provider != NULL ? provider : "default");
+        ok = 0;
+        goto out;
+    } else if (ok == 0) {
+        /* incorrect signature */
+        fprintf(stderr, "Signature incorrect with %s (%s provider)\n",
+                algo, provider != NULL ? provider : "default");
+        goto out;
+    } else {
+        /* signature ok */
+        printf("Signature correct with %s (%s provider)\n", algo,
+                provider != NULL ? provider : "default");
+        ok = 1;
+    }
+
+out:
+    if (ctx != NULL)
+        EVP_PKEY_CTX_free(ctx);
+
+    return ok;
+}
+
+static int sign_digest(const char* provider, EVP_PKEY *rsa_pkey,
+                       const char *md_name, int pss_padding,
+                       const char *pss_mgf1_md, int pss_saltlen,
+                       const unsigned char *tbs, size_t tbs_len,
+                       unsigned char *sig, size_t *sig_len)
+{
+    char props[200];
+    EVP_MD_CTX *md_ctx = NULL;
+    EVP_PKEY_CTX *ctx = NULL;
+    int ok = 0;
+
+    sprintf(props, "%sprovider=%s", provider != NULL ? "?" : "",
+            provider != NULL ? provider : "default");
+
+    md_ctx = EVP_MD_CTX_new();
+    if (md_ctx == NULL) {
+        fprintf(stderr, "EVP_MD_CTX_new failed\n");
+        goto out;
+    }
+
+    if (EVP_DigestSignInit_ex(md_ctx, &ctx, md_name, NULL,
+                              props, rsa_pkey, NULL) == 0) {
+        fprintf(stderr, "EVP_DigestSignInit_ex failed\n");
+        goto out;
+    }
+
+    if (!check_provider(ctx, provider))
+        goto out;
+
+    if (!set_rsa_pss_params(ctx, pss_padding, pss_mgf1_md, pss_saltlen))
+        goto out;
+
+    if (EVP_DigestSignUpdate(md_ctx, tbs, tbs_len) <= 0) {
+        fprintf(stderr, "EVP_DigestSignUpdate (1) failed\n");
+        goto out;
+    }
+
+    if (EVP_DigestSignUpdate(md_ctx, tbs, tbs_len) <= 0) {
+        fprintf(stderr, "EVP_DigestSignUpdate (2) failed\n");
+        goto out;
+    }
+
+    if (EVP_DigestSignFinal(md_ctx, sig, sig_len) <= 0) {
+        fprintf(stderr, "EVP_DigestSignFinal failed\n");
+        goto out;
+    }
+
+    ok = 1;
+
+out:
+    if (md_ctx != NULL)
+        EVP_MD_CTX_free(md_ctx);
+
+    return ok;
+}
+
+static int verify_digest(const char* provider, const char *algo,
+                         EVP_PKEY *rsa_pkey, const char *md_name,
+                         int pss_padding, const char *pss_mgf1_md,
+                         int pss_saltlen, const unsigned char *tbs,
+                         size_t tbs_len, unsigned char *sig, size_t sig_len)
+{
+    char props[200];
+    EVP_MD_CTX *md_ctx = NULL;
+    EVP_PKEY_CTX *ctx = NULL;
+    int ok = 0;
+
+    sprintf(props, "%sprovider=%s", provider != NULL ? "?" : "",
+            provider != NULL ? provider : "default");
+
+    md_ctx = EVP_MD_CTX_new();
+    if (md_ctx == NULL) {
+        fprintf(stderr, "EVP_MD_CTX_new failed\n");
+        goto out;
+    }
+
+    if (EVP_DigestVerifyInit_ex(md_ctx, &ctx, md_name, NULL,
+                                props, rsa_pkey, NULL) == 0) {
+        fprintf(stderr, "EVP_DigestVerifyInit_ex failed\n");
+        goto out;
+    }
+
+    if (!check_provider(ctx, provider))
+        goto out;
+
+    if (!set_rsa_pss_params(ctx, pss_padding, pss_mgf1_md, pss_saltlen))
+        goto out;
+
+    if (EVP_DigestVerifyUpdate(md_ctx, tbs, tbs_len) <= 0) {
+        fprintf(stderr, "EVP_DigestVerifyUpdate (1) failed\n");
+        goto out;
+    }
+
+    if (EVP_DigestVerifyUpdate(md_ctx, tbs, tbs_len) <= 0) {
+        fprintf(stderr, "EVP_DigestVerifyUpdate (2) failed\n");
+        goto out;
+    }
+
+    ok = EVP_DigestVerifyFinal(md_ctx, sig, sig_len);
+    if (ok == -1) {
+        /* error */
+        fprintf(stderr, "Failed to digest-verify signature with %s (%s provider)\n",
+                algo, provider != NULL ? provider : "default");
+        ok = 0;
+        goto out;
+    } else if (ok == 0) {
+        /* incorrect signature */
+        fprintf(stderr, "Digest-Signature incorrect with %s (%s provider)\n",
+                algo, provider != NULL ? provider : "default");
+        goto out;
+    } else {
+        /* signature ok */
+        printf("Digest-Signature correct with %s (%s provider)\n", algo,
+                provider != NULL ? provider : "default");
+        ok = 1;
+    }
+
+out:
+    if (md_ctx != NULL)
+        EVP_MD_CTX_free(md_ctx);
+
+    return ok;
+}
+
+static int check_rsakey(int bits, const char *algo, const char *name)
+{
+    int            ok = 0;
+    size_t         siglen;
+    unsigned char  sigbuf[1024];
+    EVP_PKEY       *rsa_pkey = NULL;
+    unsigned char  digest[32];
+    const char *pss_md = NULL;
+    const char *pss_mgf1_md = NULL;
+    int pss_saltlen = 0;
+    int pss_padding = 0;
+
+    memset(digest, 0, sizeof(digest));
+
+    if (strcmp(algo, "RSA-PSS") == 0) {
+        pss_md = "SHA256";
+        pss_mgf1_md = "SHA256";
+        pss_saltlen = 24;
+        pss_padding = RSA_PKCS1_PSS_PADDING;
+    }
+
+    /* Keygen with IBMCA provider */
+    if (!generate_key("ibmca", algo, bits, pss_md, pss_mgf1_md, pss_saltlen,
+                      NULL, &rsa_pkey))
+        goto out;
+
+    /* Sign with IBMCA provider */
+    siglen = sizeof(sigbuf);
+    if (!sign_single("ibmca", rsa_pkey, pss_padding, pss_mgf1_md, pss_saltlen,
+                     digest, sizeof(digest), sigbuf, &siglen))
+        goto out;
 
     /* Verify with default provider */
-    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, rsa_pkey, "provider=default");
-    if (ctx == NULL) {
-        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+    if (!verify_single(NULL, name, rsa_pkey, pss_padding, pss_mgf1_md, pss_saltlen,
+                     digest, sizeof(digest), sigbuf, siglen))
         goto out;
-    }
 
-    if (EVP_PKEY_verify_init(ctx) <= 0) {
-        fprintf(stderr, "EVP_PKEY_verify_init failed\n");
-        goto out;
-    }
-
-    if (strcmp(algo, "RSA-PSS") == 0) {
-        if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, "SHA256",
-                                              "provider=default") <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, 24) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
-            goto out;
-        }
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "default") != 0) {
-        fprintf(stderr, "Context is not using the default provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    ret = EVP_PKEY_verify(ctx, sigbuf, siglen, digest, sizeof(digest));
-    if (ret == -1) {
-        /* error */
-        fprintf(stderr, "Failed to verify signature with %s (default provider)\n", name);
-        goto out;
-    } else if (ret == 0) {
-        /* incorrect signature */
-        fprintf(stderr, "Signature incorrect with %s (default provider)\n", name);
-        goto out;
-    } else {
-        /* signature ok */
-        printf("Signature correct with %s (default provider)\n", name);
-        ret = 0;
-    }
-
-    EVP_PKEY_CTX_free(ctx);
-    ctx = NULL;
 
     /* Verify with IBMCA provider */
-    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, rsa_pkey, "?provider=ibmca");
-    if (ctx == NULL) {
-        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+    if (!verify_single("ibmca", name, rsa_pkey, pss_padding, pss_mgf1_md, pss_saltlen,
+                     digest, sizeof(digest), sigbuf, siglen))
         goto out;
-    }
-
-    if (EVP_PKEY_verify_init(ctx) <= 0) {
-        fprintf(stderr, "EVP_PKEY_verify_init failed\n");
-        goto out;
-    }
-
-    if (strcmp(algo, "RSA-PSS") == 0) {
-        if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, "SHA256",
-                                              "provider=default") <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, 24) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
-            goto out;
-        }
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    ret = EVP_PKEY_verify(ctx, sigbuf, siglen, digest, sizeof(digest));
-    if (ret == -1) {
-        /* error */
-        fprintf(stderr, "Failed to verify signature with %s (ibmca provider)\n", name);
-        goto out;
-    } else if (ret == 0) {
-        /* incorrect signature */
-        fprintf(stderr, "Signature incorrect with %s (ibmca provider)\n", name);
-        goto out;
-    } else {
-        /* signature ok */
-        printf("Signature correct with %s (ibmca provider)\n", name);
-        ret = 0;
-    }
-
-    EVP_PKEY_CTX_free(ctx);
-    ctx = NULL;
 
     /* Digest-Sign with IBMCA provider */
-    md_ctx = EVP_MD_CTX_new();
-    if (md_ctx == NULL) {
-        fprintf(stderr, "EVP_MD_CTX_new failed\n");
-        goto out;
-    }
-
-    if (EVP_DigestSignInit_ex(md_ctx, &ctx, "SHA256", NULL,
-                               "?provider=ibmca", rsa_pkey, NULL) == 0) {
-        fprintf(stderr, "EVP_DigestSignInit_ex failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (strcmp(algo, "RSA-PSS") == 0) {
-        if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
-            ctx = NULL;
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, "SHA256",
-                                              "?provider=ibmca") <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
-            ctx = NULL;
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, 24) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
-            ctx = NULL;
-            goto out;
-        }
-    }
-
-    if (EVP_DigestSignUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestSignUpdate (1) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (EVP_DigestSignUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestSignUpdate (2) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
     siglen = sizeof(sigbuf);
-    if (EVP_DigestSignFinal(md_ctx, sigbuf, &siglen) <= 0) {
-        fprintf(stderr, "EVP_DigestSignFinal failed\n");
-        ctx = NULL;
+    if (!sign_digest("ibmca", rsa_pkey, "SHA256",
+                     pss_padding, pss_mgf1_md, pss_saltlen,
+                     digest, sizeof(digest), sigbuf, &siglen))
         goto out;
-    }
-
-    EVP_MD_CTX_free(md_ctx);
-    ctx = NULL;
 
     /* Digest-Verify with default provider */
-    md_ctx = EVP_MD_CTX_new();
-    if (md_ctx == NULL) {
-        fprintf(stderr, "EVP_MD_CTX_new failed\n");
+    if (!verify_digest(NULL, name, rsa_pkey, "SHA256",
+                       pss_padding, pss_mgf1_md, pss_saltlen,
+                       digest, sizeof(digest), sigbuf, siglen))
         goto out;
-    }
-
-    if (EVP_DigestVerifyInit_ex(md_ctx, &ctx, "SHA256", NULL,
-                                "provider=default", rsa_pkey, NULL) == 0) {
-        fprintf(stderr, "EVP_DigestVerifyInit_ex failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (strcmp(algo, "RSA-PSS") == 0) {
-        if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
-            ctx = NULL;
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, "SHA256",
-                                              "?provider=ibmca") <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
-            ctx = NULL;
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, 24) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
-            ctx = NULL;
-            goto out;
-        }
-    }
-
-    if (EVP_DigestVerifyUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestVerifyUpdate (1) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (EVP_DigestVerifyUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestVerifyUpdate (2) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    ret = EVP_DigestVerifyFinal(md_ctx, sigbuf, siglen);
-    if (ret == -1) {
-        /* error */
-        fprintf(stderr, "Failed to digest-verify signature with %s (default provider)\n", name);
-        ctx = NULL;
-        goto out;
-    } else if (ret == 0) {
-        /* incorrect signature */
-        fprintf(stderr, "Digest-Signature incorrect with %s (default provider)\n", name);
-        ctx = NULL;
-        goto out;
-    } else {
-        /* signature ok */
-        printf("Digest-Signature correct with %s (default provider)\n", name);
-        ret = 0;
-    }
-
-    EVP_MD_CTX_free(md_ctx);
-    ctx = NULL;
 
     /* Digest-Verify with IBMCA provider */
-    md_ctx = EVP_MD_CTX_new();
-    if (md_ctx == NULL) {
-        fprintf(stderr, "EVP_MD_CTX_new failed\n");
+    if (!verify_digest("ibmca", name, rsa_pkey, "SHA256",
+                       pss_padding, pss_mgf1_md, pss_saltlen,
+                       digest, sizeof(digest), sigbuf, siglen))
         goto out;
-    }
-
-    if (EVP_DigestVerifyInit_ex(md_ctx, &ctx, "SHA256", NULL,
-                                "?provider=ibmca", rsa_pkey, NULL) == 0) {
-        fprintf(stderr, "EVP_DigestVerifyInit_ex failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (strcmp(algo, "RSA-PSS") == 0) {
-        if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
-            ctx = NULL;
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, "SHA256",
-                                              "?provider=ibmca") <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
-            ctx = NULL;
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, 24) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
-            ctx = NULL;
-            goto out;
-        }
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_DigestVerifyUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestVerifyUpdate (1) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (EVP_DigestVerifyUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestVerifyUpdate (2) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    ret = EVP_DigestVerifyFinal(md_ctx, sigbuf, siglen);
-    if (ret == -1) {
-        /* error */
-        fprintf(stderr, "Failed to digest-verify signature with %s (IBMCA provider)\n", name);
-        ctx = NULL;
-        goto out;
-    } else if (ret == 0) {
-        /* incorrect signature */
-        fprintf(stderr, "Digest-Signature incorrect with %s (IBMCA provider)\n", name);
-        ctx = NULL;
-        goto out;
-    } else {
-        /* signature ok */
-        printf("Digest-Signature correct with %s (IBMCA provider)\n", name);
-        ret = 0;
-    }
-
-    EVP_MD_CTX_free(md_ctx);
-    ctx = NULL;
 
     /* Digest-Sign with default provider */
-    md_ctx = EVP_MD_CTX_new();
-    if (md_ctx == NULL) {
-        fprintf(stderr, "EVP_MD_CTX_new failed\n");
-        goto out;
-    }
-
-    if (EVP_DigestSignInit_ex(md_ctx, &ctx, "SHA256", NULL,
-                               "provider=default", rsa_pkey, NULL) == 0) {
-        fprintf(stderr, "EVP_DigestSignInit_ex failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "default") != 0) {
-        fprintf(stderr, "Context is not using the default provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (strcmp(algo, "RSA-PSS") == 0) {
-        if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
-            ctx = NULL;
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, "SHA256",
-                                              "?provider=ibmca") <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
-            ctx = NULL;
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, 24) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
-            ctx = NULL;
-            goto out;
-        }
-    }
-
-    if (EVP_DigestSignUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestSignUpdate (1) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (EVP_DigestSignUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestSignUpdate (2) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
     siglen = sizeof(sigbuf);
-    if (EVP_DigestSignFinal(md_ctx, sigbuf, &siglen) <= 0) {
-        fprintf(stderr, "EVP_DigestSignFinal failed\n");
-        ctx = NULL;
+    if (!sign_digest(NULL, rsa_pkey, "SHA256",
+                     pss_padding, pss_mgf1_md, pss_saltlen,
+                     digest, sizeof(digest), sigbuf, &siglen))
         goto out;
-    }
-
-    EVP_MD_CTX_free(md_ctx);
-    ctx = NULL;
 
     /* Digest-Verify with default provider */
-    md_ctx = EVP_MD_CTX_new();
-    if (md_ctx == NULL) {
-        fprintf(stderr, "EVP_MD_CTX_new failed\n");
+    if (!verify_digest(NULL, name, rsa_pkey, "SHA256",
+                       pss_padding, pss_mgf1_md, pss_saltlen,
+                       digest, sizeof(digest), sigbuf, siglen))
         goto out;
-    }
-
-    if (EVP_DigestVerifyInit_ex(md_ctx, &ctx, "SHA256", NULL,
-                                "provider=default", rsa_pkey, NULL) == 0) {
-        fprintf(stderr, "EVP_DigestVerifyInit_ex failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (strcmp(algo, "RSA-PSS") == 0) {
-        if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
-            ctx = NULL;
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, "SHA256",
-                                              "?provider=ibmca") <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
-            ctx = NULL;
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, 24) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
-            ctx = NULL;
-            goto out;
-        }
-    }
-
-    if (EVP_DigestVerifyUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestVerifyUpdate (1) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (EVP_DigestVerifyUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestVerifyUpdate (2) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    ret = EVP_DigestVerifyFinal(md_ctx, sigbuf, siglen);
-    if (ret == -1) {
-        /* error */
-        fprintf(stderr, "Failed to digest-verify signature with %s (default provider)\n", name);
-        ctx = NULL;
-        goto out;
-    } else if (ret == 0) {
-        /* incorrect signature */
-        fprintf(stderr, "Digest-Signature incorrect with %s (default provider)\n", name);
-        ctx = NULL;
-        goto out;
-    } else {
-        /* signature ok */
-        printf("Digest-Signature correct with %s (default provider)\n", name);
-        ret = 0;
-    }
-
-    EVP_MD_CTX_free(md_ctx);
-    ctx = NULL;
 
     /* Digest-Verify with IBMCA provider */
-    md_ctx = EVP_MD_CTX_new();
-    if (md_ctx == NULL) {
-        fprintf(stderr, "EVP_MD_CTX_new failed\n");
+    if (!verify_digest("ibmca", name, rsa_pkey, "SHA256",
+                       pss_padding, pss_mgf1_md, pss_saltlen,
+                       digest, sizeof(digest), sigbuf, siglen))
         goto out;
-    }
 
-    if (EVP_DigestVerifyInit_ex(md_ctx, &ctx, "SHA256", NULL,
-                                "?provider=ibmca", rsa_pkey, NULL) == 0) {
-        fprintf(stderr, "EVP_DigestVerifyInit_ex failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (strcmp(algo, "RSA-PSS") == 0) {
-        if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_padding failed\n");
-            ctx = NULL;
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_mgf1_md_name(ctx, "SHA256",
-                                              "?provider=ibmca") <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_mgf1_md_name failed\n");
-            ctx = NULL;
-            goto out;
-        }
-
-        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, 24) <= 0) {
-            fprintf(stderr, "EVP_PKEY_CTX_set_rsa_pss_saltlen failed\n");
-            ctx = NULL;
-            goto out;
-        }
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_DigestVerifyUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestVerifyUpdate (1) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (EVP_DigestVerifyUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestVerifyUpdate (2) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    ret = EVP_DigestVerifyFinal(md_ctx, sigbuf, siglen);
-    if (ret == -1) {
-        /* error */
-        fprintf(stderr, "Failed to digest-verify signature with %s (IBMCA provider)\n", name);
-        ctx = NULL;
-        goto out;
-    } else if (ret == 0) {
-        /* incorrect signature */
-        fprintf(stderr, "Digest-Signature incorrect with %s (IBMCA provider)\n", name);
-        ctx = NULL;
-        goto out;
-    } else {
-        /* signature ok */
-        printf("Digest-Signature correct with %s (IBMCA provider)\n", name);
-        ret = 0;
-    }
-
-    ctx = NULL;
-
-    ret = 1;
+    ok = 1;
 
  out:
     if (rsa_pkey)
        EVP_PKEY_free(rsa_pkey);
-    if (ctx)
-       EVP_PKEY_CTX_free(ctx);
-    if (md_ctx)
-        EVP_MD_CTX_free(md_ctx);
 
     ERR_print_errors_fp(stderr);
 
-    return ret;
+    return ok;
 }
 
 static const unsigned int required_ica_mechs[] = { RSA_ME,  RSA_CRT };
@@ -739,7 +495,7 @@ static const unsigned int required_ica_mechs_len =
 typedef unsigned int (*ica_get_functionlist_t)(libica_func_list_element *,
                                                unsigned int *);
 
-int check_libica()
+static int check_libica()
 {
     unsigned int mech_len, i, k, found = 0;
     libica_func_list_element *mech_list = NULL;

@@ -32,7 +32,7 @@
 
 #define UNUSED(var)                             ((void)(var))
 
-void setup(void)
+static void setup(void)
 {
     OPENSSL_load_builtin_modules();
 
@@ -41,28 +41,53 @@ void setup(void)
                            CONF_MFLAGS_IGNORE_MISSING_FILE);
 }
 
-int check_eckey(int nid, const char *name)
+static int check_provider(EVP_PKEY_CTX *ctx, const char *expected_provider)
 {
-    int            ret = 0;
-    size_t         siglen;
-    unsigned char  sigbuf[1024];
-    EVP_PKEY_CTX  *ctx = NULL;
-    EVP_PKEY      *ec_pkey = NULL;
-    EVP_PKEY      *peer_pkey = NULL;
-    size_t         keylen1, keylen2;
-    unsigned char  keybuf1[512], keybuf2[512];
-    EVP_MD_CTX     *md_ctx = NULL;
-    unsigned char  digest[32];
     const OSSL_PROVIDER *provider;
     const char *provname;
 
-    memset(digest, 0, sizeof(digest));
+    if (expected_provider == NULL)
+        expected_provider = "default";
 
-    /* Keygen with IBMCA provider */
-    ctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", "?provider=ibmca");
-    if (ctx == NULL) {
-        fprintf(stderr, "EVP_PKEY_CTX_new_from_name failed\n");
-        goto out;
+    provider = EVP_PKEY_CTX_get0_provider(ctx);
+    if (provider == NULL) {
+        fprintf(stderr, "Context is not a provider-context\n");
+        return 0;
+    }
+
+    provname = OSSL_PROVIDER_get0_name(provider);
+    if (strcmp(provname, expected_provider) != 0) {
+        fprintf(stderr, "Context is not using the %s provider, but '%s'\n",
+                expected_provider, provname);
+        return 0;
+    }
+
+    return 1;
+}
+
+static int generate_key(const char* provider, int nid, const char *curvename,
+                        const OSSL_PARAM *params, EVP_PKEY *template,
+                        EVP_PKEY **ec_pkey)
+{
+    char props[200];
+    EVP_PKEY_CTX *ctx = NULL;
+    int ok = 0;
+
+    sprintf(props, "%sprovider=%s", provider != NULL ? "?" : "",
+            provider != NULL ? provider : "default");
+
+    if (template != NULL) {
+        ctx = EVP_PKEY_CTX_new_from_pkey(NULL, template, props);
+        if (ctx == NULL) {
+            fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+            goto out;
+        }
+    } else {
+        ctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", props);
+        if (ctx == NULL) {
+            fprintf(stderr, "EVP_PKEY_CTX_new_from_name failed\n");
+            goto out;
+        }
     }
 
     if (EVP_PKEY_keygen_init(ctx) <= 0) {
@@ -70,45 +95,61 @@ int check_eckey(int nid, const char *name)
         goto out;
     }
 
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
+    if (!check_provider(ctx, provider))
         goto out;
-    }
 
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, nid) <= 0) {
-        if (ERR_GET_REASON(ERR_peek_last_error()) == 7) {
-            /* curve not supported => test passed */
-            fprintf(stderr, "Curve %s not supported by OpenSSL\n", name);
-            ret = 1;
-        } else {
-            fprintf(stderr, "EVP_PKEY_CTX_set_ec_paramgen_curve_nid failed\n");
+    if (template == NULL) {
+        if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, nid) <= 0) {
+            if (ERR_GET_REASON(ERR_peek_last_error()) == 7) {
+                /* curve not supported => test passed */
+                fprintf(stderr, "Curve %s not supported by OpenSSL\n", curvename);
+                ok = 1;
+            } else {
+                fprintf(stderr, "EVP_PKEY_CTX_set_ec_paramgen_curve_nid failed\n");
+            }
+            goto out;
         }
-        goto out;
     }
 
-    if (EVP_PKEY_keygen(ctx, &ec_pkey) <= 0) {
+    if (params != NULL) {
+        if (EVP_PKEY_CTX_set_params(ctx, params) != 1) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_params failed\n");
+            goto out;
+        }
+    }
+
+    if (EVP_PKEY_keygen(ctx, ec_pkey) <= 0) {
         if (ERR_GET_REASON(ERR_peek_last_error()) == 7) {
             /* curve not supported => test passed */
-            fprintf(stderr, "Curve %s not supported by OpenSSL\n", name);
-            ret = 1;
+            fprintf(stderr, "Curve %s not supported by OpenSSL\n", curvename);
+            ok = 1;
         } else {
             fprintf(stderr, "EVP_PKEY_keygen failed\n");
         }
         goto out;
     }
 
-    EVP_PKEY_CTX_free(ctx);
+    ok = 1;
 
-    /* Sign with IBMCA provider */
-    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "?provider=ibmca");
+out:
+    if (ctx != NULL)
+        EVP_PKEY_CTX_free(ctx);
+
+    return ok;
+}
+
+static int sign_single(const char* provider, EVP_PKEY *ec_pkey,
+                       const unsigned char *tbs, size_t tbs_len,
+                       unsigned char *sig, size_t *sig_len)
+{
+    char props[200];
+    EVP_PKEY_CTX *ctx = NULL;
+    int ok = 0;
+
+    sprintf(props, "%sprovider=%s", provider != NULL ? "?" : "",
+            provider != NULL ? provider : "default");
+
+    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, props);
     if (ctx == NULL) {
         fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
         goto out;
@@ -119,669 +160,380 @@ int check_eckey(int nid, const char *name)
         goto out;
     }
 
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
+    if (!check_provider(ctx, provider))
         goto out;
-    }
 
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    siglen = sizeof(sigbuf);
-    if (EVP_PKEY_sign(ctx, sigbuf, &siglen, digest, sizeof(digest)) <= 0) {
+    if (EVP_PKEY_sign(ctx, sig, sig_len, tbs, tbs_len) <= 0) {
         fprintf(stderr, "EVP_PKEY_sign failed\n");
         goto out;
     }
 
-    EVP_PKEY_CTX_free(ctx);
+    ok = 1;
+
+out:
+    if (ctx != NULL)
+        EVP_PKEY_CTX_free(ctx);
+
+    return ok;
+}
+
+static int verify_single(const char* provider, const char *curvename,
+                         EVP_PKEY *ec_pkey, const unsigned char *tbs,
+                         size_t tbs_len, const unsigned char *sig,
+                         size_t sig_len)
+{
+    char props[200];
+    EVP_PKEY_CTX *ctx = NULL;
+    int ok = 0;
+
+    sprintf(props, "%sprovider=%s", provider != NULL ? "?" : "",
+            provider != NULL ? provider : "default");
+
+    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, props);
+    if (ctx == NULL) {
+        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_verify_init(ctx) <= 0) {
+        fprintf(stderr, "EVP_PKEY_verify_init failed\n");
+        goto out;
+    }
+
+    if (!check_provider(ctx, provider))
+        goto out;
+
+    ok = EVP_PKEY_verify(ctx, sig, sig_len, tbs, tbs_len);
+    if (ok == -1) {
+        /* error */
+        fprintf(stderr, "Failed to verify signature with %s (%s provider)\n",
+                curvename, provider != NULL ? provider : "default");
+        ok = 0;
+        goto out;
+    } else if (ok == 0) {
+        /* incorrect signature */
+        fprintf(stderr, "Signature incorrect with %s (%s provider)\n",
+                curvename, provider != NULL ? provider : "default");
+        goto out;
+    } else {
+        /* signature ok */
+        printf("Signature correct with %s (%s provider)\n", curvename,
+                provider != NULL ? provider : "default");
+        ok = 1;
+    }
+
+out:
+    if (ctx != NULL)
+        EVP_PKEY_CTX_free(ctx);
+
+    return ok;
+}
+
+static int sign_digest(const char* provider, EVP_PKEY *ec_pkey,
+                       const char *md_name, const OSSL_PARAM *params,
+                       const unsigned char *tbs, size_t tbs_len,
+                       unsigned char *sig, size_t *sig_len)
+{
+    char props[200];
+    EVP_MD_CTX *md_ctx = NULL;
+    EVP_PKEY_CTX *ctx = NULL;
+    int ok = 0;
+
+    sprintf(props, "%sprovider=%s", provider != NULL ? "?" : "",
+            provider != NULL ? provider : "default");
+
+    md_ctx = EVP_MD_CTX_new();
+    if (md_ctx == NULL) {
+        fprintf(stderr, "EVP_MD_CTX_new failed\n");
+        goto out;
+    }
+
+    if (EVP_DigestSignInit_ex(md_ctx, &ctx, md_name, NULL,
+                              props, ec_pkey, NULL) == 0) {
+        fprintf(stderr, "EVP_DigestSignInit_ex failed\n");
+        goto out;
+    }
+
+    if (!check_provider(ctx, provider))
+        goto out;
+
+    if (params != NULL) {
+        if (EVP_PKEY_CTX_set_params(ctx, params) == 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_params failed\n");
+            goto out;
+        }
+    }
+
+    if (EVP_DigestSignUpdate(md_ctx, tbs, tbs_len) <= 0) {
+        fprintf(stderr, "EVP_DigestSignUpdate (1) failed\n");
+        goto out;
+    }
+
+    if (EVP_DigestSignUpdate(md_ctx, tbs, tbs_len) <= 0) {
+        fprintf(stderr, "EVP_DigestSignUpdate (2) failed\n");
+        goto out;
+    }
+
+    if (EVP_DigestSignFinal(md_ctx, sig, sig_len) <= 0) {
+        fprintf(stderr, "EVP_DigestSignFinal failed\n");
+        goto out;
+    }
+
+    ok = 1;
+
+out:
+    if (md_ctx != NULL)
+        EVP_MD_CTX_free(md_ctx);
+
+    return ok;
+}
+
+static int verify_digest(const char* provider, const char *curvename,
+                         EVP_PKEY *ec_pkey, const char *md_name,
+                         const unsigned char *tbs, size_t tbs_len,
+                         unsigned char *sig, size_t sig_len)
+{
+    char props[200];
+    EVP_MD_CTX *md_ctx = NULL;
+    EVP_PKEY_CTX *ctx = NULL;
+    int ok = 0;
+
+    sprintf(props, "%sprovider=%s", provider != NULL ? "?" : "",
+            provider != NULL ? provider : "default");
+
+    md_ctx = EVP_MD_CTX_new();
+    if (md_ctx == NULL) {
+        fprintf(stderr, "EVP_MD_CTX_new failed\n");
+        goto out;
+    }
+
+    if (EVP_DigestVerifyInit_ex(md_ctx, &ctx, md_name, NULL,
+                                props, ec_pkey, NULL) == 0) {
+        fprintf(stderr, "EVP_DigestVerifyInit_ex failed\n");
+        goto out;
+    }
+
+    if (!check_provider(ctx, provider))
+        goto out;
+
+    if (EVP_DigestVerifyUpdate(md_ctx, tbs, tbs_len) <= 0) {
+        fprintf(stderr, "EVP_DigestVerifyUpdate (1) failed\n");
+        goto out;
+    }
+
+    if (EVP_DigestVerifyUpdate(md_ctx, tbs, tbs_len) <= 0) {
+        fprintf(stderr, "EVP_DigestVerifyUpdate (2) failed\n");
+        goto out;
+    }
+
+    ok = EVP_DigestVerifyFinal(md_ctx, sig, sig_len);
+    if (ok == -1) {
+        /* error */
+        fprintf(stderr, "Failed to digest-verify signature with %s (%s provider)\n",
+                curvename, provider != NULL ? provider : "default");
+        ok = 0;
+        goto out;
+    } else if (ok == 0) {
+        /* incorrect signature */
+        fprintf(stderr, "Digest-Signature incorrect with %s (%s provider)\n",
+                curvename, provider != NULL ? provider : "default");
+        goto out;
+    } else {
+        /* signature ok */
+        printf("Digest-Signature correct with %s (%s provider)\n", curvename,
+                provider != NULL ? provider : "default");
+        ok = 1;
+    }
+
+out:
+    if (md_ctx != NULL)
+        EVP_MD_CTX_free(md_ctx);
+
+    return ok;
+}
+
+static int derive_key(const char* provider, EVP_PKEY *ec_pkey,
+                      EVP_PKEY *peer_pkey, int kdf, const char *kdf_md,
+                      size_t kdf_outlen, unsigned char *derived_key,
+                      size_t *derived_key_len)
+{
+    char props[200];
+    EVP_PKEY_CTX *ctx = NULL;
+    int ok = 0;
+
+    sprintf(props, "%sprovider=%s", provider != NULL ? "?" : "",
+            provider != NULL ? provider : "default");
+
+    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, props);
+    if (ctx == NULL) {
+        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_derive_init(ctx) <= 0) {
+        fprintf(stderr, "EVP_PKEY_derive_init failed\n");
+        goto out;
+    }
+
+    if (!check_provider(ctx, provider))
+        goto out;
+
+    if (kdf != 0 && kdf_md != NULL && kdf_outlen != 0) {
+        if (EVP_PKEY_CTX_set_ecdh_kdf_type(ctx, kdf) != 1) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_ecdh_kdf_type failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_ecdh_kdf_md(ctx,
+                                         EVP_get_digestbyname(kdf_md)) != 1) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_ecdh_kdf_md failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_ecdh_kdf_outlen(ctx, kdf_outlen) != 1) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_ecdh_kdf_outlen failed\n");
+            goto out;
+        }
+    }
+
+    if (EVP_PKEY_derive_set_peer_ex(ctx, peer_pkey, 1) != 1) {
+        fprintf(stderr, "EVP_PKEY_derive_set_peer_ex failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_derive(ctx, derived_key, derived_key_len) <= 0) {
+        fprintf(stderr, "EVP_PKEY_derive failed\n");
+        goto out;
+    }
+
+    ok = 1;
+
+out:
+    if (ctx != NULL)
+        EVP_PKEY_CTX_free(ctx);
+
+    return ok;
+}
+
+static int check_eckey(int nid, const char *curvename)
+{
+    int            ok = 0;
+    size_t         siglen;
+    unsigned char  sigbuf[1024];
+    EVP_PKEY      *ec_pkey = NULL;
+    EVP_PKEY      *peer_pkey = NULL;
+    size_t         keylen1, keylen2;
+    unsigned char  keybuf1[512], keybuf2[512];
+    unsigned char  digest[32];
+
+    memset(digest, 0, sizeof(digest));
+
+    /* Keygen with IBMCA provider */
+    if (!generate_key("ibmca", nid, curvename, NULL, NULL, &ec_pkey))
+        goto out;
+    if (ec_pkey == NULL) {
+        ok = 1; /* Curve not supported, skip */
+        goto out;
+    }
+
+    /* Sign with IBMCA provider */
+    siglen = sizeof(sigbuf);
+    if (!sign_single("ibmca", ec_pkey, digest, sizeof(digest),
+                     sigbuf, &siglen))
+        goto out;
 
     /* Verify with default provider */
-    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "provider=default");
-    if (ctx == NULL) {
-        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+    if (!verify_single(NULL, curvename, ec_pkey,
+                       digest, sizeof(digest), sigbuf, siglen))
         goto out;
-    }
-
-    if (EVP_PKEY_verify_init(ctx) <= 0) {
-        fprintf(stderr, "EVP_PKEY_verify_init failed\n");
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "default") != 0) {
-        fprintf(stderr, "Context is not using the default provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    ret = EVP_PKEY_verify(ctx, sigbuf, siglen, digest, sizeof(digest));
-    if (ret == -1) {
-        /* error */
-        fprintf(stderr, "Failed to verify signature with %s (default provider)\n", name);
-        goto out;
-    } else if (ret == 0) {
-        /* incorrect signature */
-        fprintf(stderr, "Signature incorrect with %s (default provider)\n", name);
-        goto out;
-    } else {
-        /* signature ok */
-        printf("Signature correct with %s (default provider)\n", name);
-        ret = 0;
-    }
-
-    EVP_PKEY_CTX_free(ctx);
-    ctx = NULL;
 
     /* Verify with IBMCA provider */
-    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "?provider=ibmca");
-    if (ctx == NULL) {
-        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+    if (!verify_single("ibmca", curvename, ec_pkey,
+                       digest, sizeof(digest), sigbuf, siglen))
         goto out;
-    }
 
-    if (EVP_PKEY_verify_init(ctx) <= 0) {
-        fprintf(stderr, "EVP_PKEY_verify_init failed\n");
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    ret = EVP_PKEY_verify(ctx, sigbuf, siglen, digest, sizeof(digest));
-    if (ret == -1) {
-        /* error */
-        fprintf(stderr, "Failed to verify signature with %s (ibmca provider)\n", name);
-        goto out;
-    } else if (ret == 0) {
-        /* incorrect signature */
-        fprintf(stderr, "Signature incorrect with %s (ibmca provider)\n", name);
-        goto out;
-    } else {
-        /* signature ok */
-        printf("Signature correct with %s (ibmca provider)\n", name);
-        ret = 0;
-    }
-
-    EVP_PKEY_CTX_free(ctx);
-    ctx = NULL;
 
     /* Digest-Sign with IBMCA provider */
-    md_ctx = EVP_MD_CTX_new();
-    if (md_ctx == NULL) {
-        fprintf(stderr, "EVP_MD_CTX_new failed\n");
-        goto out;
-    }
-
-    if (EVP_DigestSignInit_ex(md_ctx, &ctx, "SHA256", NULL,
-                               "?provider=ibmca", ec_pkey, NULL) == 0) {
-        fprintf(stderr, "EVP_DigestSignInit_ex failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_DigestSignUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestSignUpdate (1) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (EVP_DigestSignUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestSignUpdate (2) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
     siglen = sizeof(sigbuf);
-    if (EVP_DigestSignFinal(md_ctx, sigbuf, &siglen) <= 0) {
-        fprintf(stderr, "EVP_DigestSignFinal failed\n");
-        ctx = NULL;
+    if (!sign_digest("ibmca", ec_pkey, "SHA256", NULL,
+                     digest, sizeof(digest), sigbuf, &siglen))
         goto out;
-    }
-
-    EVP_MD_CTX_free(md_ctx);
-    ctx = NULL;
 
     /* Digest-Verify with default provider */
-    md_ctx = EVP_MD_CTX_new();
-    if (md_ctx == NULL) {
-        fprintf(stderr, "EVP_MD_CTX_new failed\n");
+    if (!verify_digest(NULL, curvename, ec_pkey, "SHA256",
+                       digest, sizeof(digest), sigbuf, siglen))
         goto out;
-    }
-
-    if (EVP_DigestVerifyInit_ex(md_ctx, &ctx, "SHA256", NULL,
-                                "provider=default", ec_pkey, NULL) == 0) {
-        fprintf(stderr, "EVP_DigestVerifyInit_ex failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (EVP_DigestVerifyUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestVerifyUpdate (1) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (EVP_DigestVerifyUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestVerifyUpdate (2) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    ret = EVP_DigestVerifyFinal(md_ctx, sigbuf, siglen);
-    if (ret == -1) {
-        /* error */
-        fprintf(stderr, "Failed to digest-verify signature with %s (default provider)\n", name);
-        ctx = NULL;
-        goto out;
-    } else if (ret == 0) {
-        /* incorrect signature */
-        fprintf(stderr, "Digest-Signature incorrect with %s (default provider)\n", name);
-        ctx = NULL;
-        goto out;
-    } else {
-        /* signature ok */
-        printf("Digest-Signature correct with %s (default provider)\n", name);
-        ret = 0;
-    }
-
-    EVP_MD_CTX_free(md_ctx);
-    ctx = NULL;
 
     /* Digest-Verify with IBMCA provider */
-    md_ctx = EVP_MD_CTX_new();
-    if (md_ctx == NULL) {
-        fprintf(stderr, "EVP_MD_CTX_new failed\n");
+    if (!verify_digest("ibmca", curvename, ec_pkey, "SHA256",
+                       digest, sizeof(digest), sigbuf, siglen))
         goto out;
-    }
-
-    if (EVP_DigestVerifyInit_ex(md_ctx, &ctx, "SHA256", NULL,
-                                "?provider=ibmca", ec_pkey, NULL) == 0) {
-        fprintf(stderr, "EVP_DigestVerifyInit_ex failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_DigestVerifyUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestVerifyUpdate (1) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (EVP_DigestVerifyUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestVerifyUpdate (2) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    ret = EVP_DigestVerifyFinal(md_ctx, sigbuf, siglen);
-    if (ret == -1) {
-        /* error */
-        fprintf(stderr, "Failed to digest-verify signature with %s (IBMCA provider)\n", name);
-        ctx = NULL;
-        goto out;
-    } else if (ret == 0) {
-        /* incorrect signature */
-        fprintf(stderr, "Digest-Signature incorrect with %s (IBMCA provider)\n", name);
-        ctx = NULL;
-        goto out;
-    } else {
-        /* signature ok */
-        printf("Digest-Signature correct with %s (IBMCA provider)\n", name);
-        ret = 0;
-    }
-
-    EVP_MD_CTX_free(md_ctx);
-    ctx = NULL;
 
     /* Digest-Sign with default provider */
-    md_ctx = EVP_MD_CTX_new();
-    if (md_ctx == NULL) {
-        fprintf(stderr, "EVP_MD_CTX_new failed\n");
-        goto out;
-    }
-
-    if (EVP_DigestSignInit_ex(md_ctx, &ctx, "SHA256", NULL,
-                               "provider=default", ec_pkey, NULL) == 0) {
-        fprintf(stderr, "EVP_DigestSignInit_ex failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "default") != 0) {
-        fprintf(stderr, "Context is not using the default provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_DigestSignUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestSignUpdate (1) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (EVP_DigestSignUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestSignUpdate (2) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
     siglen = sizeof(sigbuf);
-    if (EVP_DigestSignFinal(md_ctx, sigbuf, &siglen) <= 0) {
-        fprintf(stderr, "EVP_DigestSignFinal failed\n");
-        ctx = NULL;
+    if (!sign_digest(NULL, ec_pkey, "SHA256", NULL,
+                     digest, sizeof(digest), sigbuf, &siglen))
         goto out;
-    }
-
-    EVP_MD_CTX_free(md_ctx);
-    ctx = NULL;
 
     /* Digest-Verify with default provider */
-    md_ctx = EVP_MD_CTX_new();
-    if (md_ctx == NULL) {
-        fprintf(stderr, "EVP_MD_CTX_new failed\n");
+    if (!verify_digest(NULL, curvename, ec_pkey, "SHA256",
+                       digest, sizeof(digest), sigbuf, siglen))
         goto out;
-    }
-
-    if (EVP_DigestVerifyInit_ex(md_ctx, &ctx, "SHA256", NULL,
-                                "provider=default", ec_pkey, NULL) == 0) {
-        fprintf(stderr, "EVP_DigestVerifyInit_ex failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (EVP_DigestVerifyUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestVerifyUpdate (1) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (EVP_DigestVerifyUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestVerifyUpdate (2) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    ret = EVP_DigestVerifyFinal(md_ctx, sigbuf, siglen);
-    if (ret == -1) {
-        /* error */
-        fprintf(stderr, "Failed to digest-verify signature with %s (default provider)\n", name);
-        ctx = NULL;
-        goto out;
-    } else if (ret == 0) {
-        /* incorrect signature */
-        fprintf(stderr, "Digest-Signature incorrect with %s (default provider)\n", name);
-        ctx = NULL;
-        goto out;
-    } else {
-        /* signature ok */
-        printf("Digest-Signature correct with %s (default provider)\n", name);
-        ret = 0;
-    }
-
-    EVP_MD_CTX_free(md_ctx);
-    ctx = NULL;
 
     /* Digest-Verify with IBMCA provider */
-    md_ctx = EVP_MD_CTX_new();
-    if (md_ctx == NULL) {
-        fprintf(stderr, "EVP_MD_CTX_new failed\n");
+    if (!verify_digest("ibmca", curvename, ec_pkey, "SHA256",
+                       digest, sizeof(digest), sigbuf, siglen))
         goto out;
-    }
-
-    if (EVP_DigestVerifyInit_ex(md_ctx, &ctx, "SHA256", NULL,
-                                "?provider=ibmca", ec_pkey, NULL) == 0) {
-        fprintf(stderr, "EVP_DigestVerifyInit_ex failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_DigestVerifyUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestVerifyUpdate (1) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    if (EVP_DigestVerifyUpdate(md_ctx, digest, sizeof(digest)) <= 0) {
-        fprintf(stderr, "EVP_DigestVerifyUpdate (2) failed\n");
-        ctx = NULL;
-        goto out;
-    }
-
-    ret = EVP_DigestVerifyFinal(md_ctx, sigbuf, siglen);
-    if (ret == -1) {
-        /* error */
-        fprintf(stderr, "Failed to digest-verify signature with %s (IBMCA provider)\n", name);
-        ctx = NULL;
-        goto out;
-    } else if (ret == 0) {
-        /* incorrect signature */
-        fprintf(stderr, "Digest-Signature incorrect with %s (IBMCA provider)\n", name);
-        ctx = NULL;
-        goto out;
-    } else {
-        /* signature ok */
-        printf("Digest-Signature correct with %s (IBMCA provider)\n", name);
-        ret  =0;
-    }
-
-    ctx = NULL;
 
     /* Keygen with IBMCA provider (using ec_pkey as template) */
-    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "?provider=ibmca");
-    if (ctx == NULL) {
-        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+    if (!generate_key("ibmca", nid, curvename, NULL, ec_pkey, &peer_pkey))
         goto out;
-    }
-
-    if (EVP_PKEY_keygen_init(ctx) <= 0) {
-        fprintf(stderr, "EVP_PKEY_keygen_init failed\n");
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_PKEY_keygen(ctx, &peer_pkey) <= 0) {
-        if (ERR_GET_REASON(ERR_peek_last_error()) == 7) {
-            /* curve not supported => test passed */
-            fprintf(stderr, "Curve %s not supported by OpenSSL\n", name);
-            ret = 1;
-        } else {
-            fprintf(stderr, "EVP_PKEY_keygen failed\n");
-        }
-        goto out;
-    }
-
-    EVP_PKEY_CTX_free(ctx);
-    ctx = NULL;
 
     /* Derive with IBMCA provider (no KDF) */
-    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "?provider=ibmca");
-    if (ctx == NULL) {
-        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_derive_init(ctx) <= 0) {
-        fprintf(stderr, "EVP_PKEY_derive_init failed\n");
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_PKEY_derive_set_peer_ex(ctx, peer_pkey, 1) != 1) {
-        fprintf(stderr, "EVP_PKEY_derive_set_peer_ex failed\n");
-        goto out;
-    }
-
     keylen1 = sizeof(keybuf1);
-    if (EVP_PKEY_derive(ctx, keybuf1, &keylen1) <= 0) {
-        fprintf(stderr, "EVP_PKEY_derive failed\n");
+    if (!derive_key("ibmca", ec_pkey, peer_pkey, 0, NULL, 0, keybuf1, &keylen1))
         goto out;
-    }
-
-    EVP_PKEY_CTX_free(ctx);
-    ctx = NULL;
 
     /* Derive with default provider (no KDF) */
-    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "provider=default");
-    if (ctx == NULL) {
-        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_derive_init(ctx) <= 0) {
-        fprintf(stderr, "EVP_PKEY_derive_init failed\n");
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "default") != 0) {
-        fprintf(stderr, "Context is not using the default provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_PKEY_derive_set_peer_ex(ctx, peer_pkey, 1) != 1) {
-        fprintf(stderr, "EVP_PKEY_derive_set_peer_ex failed\n");
-        goto out;
-    }
-
     keylen2 = sizeof(keybuf2);
-    if (EVP_PKEY_derive(ctx, keybuf2, &keylen2) <= 0) {
-        fprintf(stderr, "EVP_PKEY_derive failed\n");
+    if (!derive_key(NULL, ec_pkey, peer_pkey, 0, NULL, 0, keybuf2, &keylen2))
         goto out;
-    }
 
     if (keylen1 != keylen2 || memcmp(keybuf1, keybuf2, keylen1) != 0) {
         fprintf(stderr, "Derived keys are not equal\n");
         goto out;
     }
-
-    EVP_PKEY_CTX_free(ctx);
-    ctx = NULL;
 
     /* Derive with IBMCA provider (X9_63 KDF) */
-    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "?provider=ibmca");
-    if (ctx == NULL) {
-        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_derive_init(ctx) <= 0) {
-        fprintf(stderr, "EVP_PKEY_derive_init failed\n");
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_PKEY_CTX_set_ecdh_kdf_type(ctx, EVP_PKEY_ECDH_KDF_X9_63) != 1) {
-        fprintf(stderr, "EVP_PKEY_CTX_set_ecdh_kdf_type failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_CTX_set_ecdh_kdf_md(ctx, EVP_get_digestbyname("SHA256")) != 1) {
-        fprintf(stderr, "EVP_PKEY_CTX_set_ecdh_kdf_md failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_CTX_set_ecdh_kdf_outlen(ctx, sizeof(keybuf1)) != 1) {
-        fprintf(stderr, "EVP_PKEY_CTX_set_ecdh_kdf_outlen failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_derive_set_peer_ex(ctx, peer_pkey, 1) != 1) {
-        fprintf(stderr, "EVP_PKEY_derive_set_peer_ex failed\n");
-        goto out;
-    }
-
     keylen1 = sizeof(keybuf1);
-    if (EVP_PKEY_derive(ctx, keybuf1, &keylen1) <= 0) {
-        fprintf(stderr, "EVP_PKEY_derive failed\n");
+    if (!derive_key("ibmca", ec_pkey, peer_pkey,
+                    EVP_PKEY_ECDH_KDF_X9_63, "SHA256", keylen1,
+                    keybuf1, &keylen1))
         goto out;
-    }
-
-    EVP_PKEY_CTX_free(ctx);
-    ctx = NULL;
 
     /* Derive with default provider (X9_63 KDF) */
-    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, ec_pkey, "provider=default");
-    if (ctx == NULL) {
-        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_derive_init(ctx) <= 0) {
-        fprintf(stderr, "EVP_PKEY_derive_init failed\n");
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "default") != 0) {
-        fprintf(stderr, "Context is not using the default provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_PKEY_CTX_set_ecdh_kdf_type(ctx, EVP_PKEY_ECDH_KDF_X9_63) != 1) {
-        fprintf(stderr, "EVP_PKEY_CTX_set_ecdh_kdf_type failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_CTX_set_ecdh_kdf_md(ctx, EVP_get_digestbyname("SHA256")) != 1) {
-        fprintf(stderr, "EVP_PKEY_CTX_set_ecdh_kdf_md failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_CTX_set_ecdh_kdf_outlen(ctx, sizeof(keybuf2)) != 1) {
-        fprintf(stderr, "EVP_PKEY_CTX_set_ecdh_kdf_outlen failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_derive_set_peer_ex(ctx, peer_pkey, 1) != 1) {
-        fprintf(stderr, "EVP_PKEY_derive_set_peer_ex failed\n");
-        goto out;
-    }
-
     keylen2 = sizeof(keybuf2);
-    if (EVP_PKEY_derive(ctx, keybuf2, &keylen2) <= 0) {
-        fprintf(stderr, "EVP_PKEY_derive failed\n");
+    if (!derive_key(NULL, ec_pkey, peer_pkey,
+                    EVP_PKEY_ECDH_KDF_X9_63, "SHA256", keylen2,
+                    keybuf2, &keylen2))
         goto out;
-    }
 
     if (keylen1 != keylen2 || memcmp(keybuf1, keybuf2, keylen1) != 0) {
         fprintf(stderr, "Derived keys are not equal\n");
         goto out;
     }
 
-    ret = 1;
+    ok = 1;
 
  out:
     if (peer_pkey)
        EVP_PKEY_free(peer_pkey);
     if (ec_pkey)
        EVP_PKEY_free(ec_pkey);
-    if (ctx)
-       EVP_PKEY_CTX_free(ctx);
-    if (md_ctx)
-        EVP_MD_CTX_free(md_ctx);
 
     ERR_print_errors_fp(stderr);
 
-    return ret;
+    return ok;
 }
 
 static const unsigned int required_ica_mechs[] = { EC_DH, EC_DSA_SIGN,
@@ -792,7 +544,7 @@ static const unsigned int required_ica_mechs_len =
 typedef unsigned int (*ica_get_functionlist_t)(libica_func_list_element *,
                                                unsigned int *);
 
-int check_libica()
+static int check_libica()
 {
     unsigned int mech_len, i, k, found = 0;
     libica_func_list_element *mech_list = NULL;

@@ -32,7 +32,7 @@
 
 #define UNUSED(var)                             ((void)(var))
 
-void setup(void)
+static void setup(void)
 {
     OPENSSL_load_builtin_modules();
 
@@ -41,315 +41,231 @@ void setup(void)
                            CONF_MFLAGS_IGNORE_MISSING_FILE);
 }
 
-int check_dhkey(int nid, const char *name, const char *algo)
+static int check_provider(EVP_PKEY_CTX *ctx, const char *expected_provider)
 {
-    int            ret = 0;
-    EVP_PKEY_CTX  *ctx = NULL;
+    const OSSL_PROVIDER *provider;
+    const char *provname;
+
+    if (expected_provider == NULL)
+        expected_provider = "default";
+
+    provider = EVP_PKEY_CTX_get0_provider(ctx);
+    if (provider == NULL) {
+        fprintf(stderr, "Context is not a provider-context\n");
+        return 0;
+    }
+
+    provname = OSSL_PROVIDER_get0_name(provider);
+    if (strcmp(provname, expected_provider) != 0) {
+        fprintf(stderr, "Context is not using the %s provider, but '%s'\n",
+                expected_provider, provname);
+        return 0;
+    }
+
+    return 1;
+}
+
+static int generate_key(const char* provider, const char *algo, int nid,
+                        const char *name, const OSSL_PARAM *params,
+                        EVP_PKEY *template, EVP_PKEY **dh_pkey)
+{
+    char props[200];
+    EVP_PKEY_CTX *ctx = NULL;
+    int ok = 0;
+
+    sprintf(props, "%sprovider=%s", provider != NULL ? "?" : "",
+            provider != NULL ? provider : "default");
+
+    if (template != NULL) {
+        ctx = EVP_PKEY_CTX_new_from_pkey(NULL, template, props);
+        if (ctx == NULL) {
+            fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+            goto out;
+        }
+    } else {
+        ctx = EVP_PKEY_CTX_new_from_name(NULL, algo, props);
+        if (ctx == NULL) {
+            fprintf(stderr, "EVP_PKEY_CTX_new_from_name failed\n");
+            goto out;
+        }
+    }
+
+    if (EVP_PKEY_keygen_init(ctx) <= 0) {
+        fprintf(stderr, "EVP_PKEY_keygen_init failed\n");
+        goto out;
+    }
+
+    if (!check_provider(ctx, provider))
+        goto out;
+
+    if (template == NULL) {
+        if (EVP_PKEY_CTX_set_dh_nid(ctx, nid) <= 0) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_dh_nid failed\n");
+            goto out;
+        }
+    }
+
+    if (params != NULL) {
+        if (EVP_PKEY_CTX_set_params(ctx, params) != 1) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_params failed\n");
+            goto out;
+        }
+    }
+
+    if (EVP_PKEY_keygen(ctx, dh_pkey) <= 0) {
+        if (ERR_GET_REASON(ERR_peek_last_error()) == 7) {
+            /* group not supported => test passed */
+            fprintf(stderr, "Group %s not supported by OpenSSL\n", name);
+            ok = 1;
+        } else {
+            fprintf(stderr, "EVP_PKEY_keygen failed\n");
+        }
+        goto out;
+    }
+
+    ok = 1;
+
+out:
+    if (ctx != NULL)
+        EVP_PKEY_CTX_free(ctx);
+
+    return ok;
+}
+
+static int derive_key(const char* provider, EVP_PKEY *dh_pkey,
+                      EVP_PKEY *peer_pkey, int kdf, const char *kdf_md,
+                      int kdf_nid, size_t kdf_outlen,
+                      unsigned char *derived_key, size_t *derived_key_len)
+{
+    char props[200];
+    EVP_PKEY_CTX *ctx = NULL;
+    int ok = 0;
+
+    sprintf(props, "%sprovider=%s", provider != NULL ? "?" : "",
+            provider != NULL ? provider : "default");
+
+    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, dh_pkey, props);
+    if (ctx == NULL) {
+        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_derive_init(ctx) <= 0) {
+        fprintf(stderr, "EVP_PKEY_derive_init failed\n");
+        goto out;
+    }
+
+    if (!check_provider(ctx, provider))
+        goto out;
+
+    if (kdf != 0 && kdf_md != NULL && kdf_nid != 0 && kdf_outlen != 0) {
+        if (EVP_PKEY_CTX_set_dh_kdf_type(ctx, kdf) != 1) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_dh_kdf_type failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_dh_kdf_md(ctx, EVP_get_digestbyname(kdf_md)) != 1) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_dh_kdf_md failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set0_dh_kdf_oid(ctx, OBJ_nid2obj(kdf_nid)) != 1) {
+            fprintf(stderr, "EVP_PKEY_CTX_set0_dh_kdf_oid failed\n");
+            goto out;
+        }
+
+        if (EVP_PKEY_CTX_set_dh_kdf_outlen(ctx, kdf_outlen) != 1) {
+            fprintf(stderr, "EVP_PKEY_CTX_set_dh_kdf_outlen failed\n");
+            goto out;
+        }
+    }
+
+    if (EVP_PKEY_derive_set_peer_ex(ctx, peer_pkey, 1) != 1) {
+        fprintf(stderr, "EVP_PKEY_derive_set_peer_ex failed\n");
+        goto out;
+    }
+
+    if (EVP_PKEY_derive(ctx, derived_key, derived_key_len) <= 0) {
+        fprintf(stderr, "EVP_PKEY_derive failed\n");
+        goto out;
+    }
+
+    ok = 1;
+
+out:
+    if (ctx != NULL)
+        EVP_PKEY_CTX_free(ctx);
+
+    return ok;
+}
+
+static int check_dhkey(int nid, const char *name, const char *algo)
+{
+    int            ok = 0;
     EVP_PKEY      *dh_pkey = NULL;
     EVP_PKEY      *peer_pkey = NULL;
     size_t         keylen1, keylen2;
     unsigned char  keybuf1[1024], keybuf2[1024];
-    const OSSL_PROVIDER *provider;
-    const char *provname;
 
     /* Keygen with IBMCA provider */
-    ctx = EVP_PKEY_CTX_new_from_name(NULL, algo, "?provider=ibmca");
-    if (ctx == NULL) {
-        fprintf(stderr, "EVP_PKEY_CTX_new_from_name failed\n");
+    if (!generate_key("ibmca", algo, nid, name, NULL, NULL, &dh_pkey))
+        goto out;
+    if (dh_pkey == NULL) {
+        ok = 1; /* Group not supported, skip */
         goto out;
     }
-
-    if (EVP_PKEY_keygen_init(ctx) <= 0) {
-        fprintf(stderr, "EVP_PKEY_keygen_init failed\n");
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_PKEY_CTX_set_dh_nid(ctx, nid) <= 0) {
-        fprintf(stderr, "EVP_PKEY_CTX_set_dh_nid failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_keygen(ctx, &dh_pkey) <= 0) {
-        if (ERR_GET_REASON(ERR_peek_last_error()) == 7) {
-            /* curve not supported => test passed */
-            fprintf(stderr, "Group %s not supported by OpenSSL\n", name);
-            ret = 1;
-        } else {
-            fprintf(stderr, "EVP_PKEY_keygen failed\n");
-        }
-        goto out;
-    }
-
-    EVP_PKEY_CTX_free(ctx);
 
     /* Keygen with IBMCA provider (using dh_pkey as template) */
-    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, dh_pkey, "?provider=ibmca");
-    if (ctx == NULL) {
-        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
+    if (!generate_key("ibmca", algo, nid, name, NULL, dh_pkey, &peer_pkey))
         goto out;
-    }
-
-    if (EVP_PKEY_keygen_init(ctx) <= 0) {
-        fprintf(stderr, "EVP_PKEY_keygen_init failed\n");
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_PKEY_keygen(ctx, &peer_pkey) <= 0) {
-        if (ERR_GET_REASON(ERR_peek_last_error()) == 7) {
-            /* curve not supported => test passed */
-            fprintf(stderr, "Group %s not supported by OpenSSL\n", name);
-            ret = 1;
-        } else {
-            fprintf(stderr, "EVP_PKEY_keygen failed\n");
-        }
-
-        goto out;
-    }
-
-    EVP_PKEY_CTX_free(ctx);
 
     /* Derive with IBMCA provider (no KDF) */
-    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, dh_pkey, "?provider=ibmca");
-    if (ctx == NULL) {
-        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_derive_init(ctx) <= 0) {
-        fprintf(stderr, "EVP_PKEY_derive_init failed\n");
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_PKEY_derive_set_peer_ex(ctx, peer_pkey, 1) != 1) {
-        fprintf(stderr, "EVP_PKEY_derive_set_peer_ex failed\n");
-        goto out;
-    }
-
     keylen1 = sizeof(keybuf1);
-    if (EVP_PKEY_derive(ctx, keybuf1, &keylen1) <= 0) {
-        fprintf(stderr, "EVP_PKEY_derive failed\n");
+    if (!derive_key("ibmca", dh_pkey, peer_pkey, 0, NULL, 0, 0,
+                    keybuf1, &keylen1))
         goto out;
-    }
-
-    EVP_PKEY_CTX_free(ctx);
-    ctx = NULL;
 
     /* Derive with default provider (no KDF) */
-    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, dh_pkey, "provider=default");
-    if (ctx == NULL) {
-        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_derive_init(ctx) <= 0) {
-        fprintf(stderr, "EVP_PKEY_derive_init failed\n");
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "default") != 0) {
-        fprintf(stderr, "Context is not using the default provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_PKEY_derive_set_peer_ex(ctx, peer_pkey, 1) != 1) {
-        fprintf(stderr, "EVP_PKEY_derive_set_peer_ex failed\n");
-        goto out;
-    }
-
     keylen2 = sizeof(keybuf2);
-    if (EVP_PKEY_derive(ctx, keybuf2, &keylen2) <= 0) {
-        fprintf(stderr, "EVP_PKEY_derive failed\n");
+    if (!derive_key(NULL, dh_pkey, peer_pkey, 0, NULL, 0, 0,
+                    keybuf2, &keylen2))
         goto out;
-    }
 
     if (keylen1 != keylen2 || memcmp(keybuf1, keybuf2, keylen1) != 0) {
         fprintf(stderr, "Derived keys are not equal\n");
         goto out;
     }
-
-    EVP_PKEY_CTX_free(ctx);
-    ctx = NULL;
 
     /* Derive with IBMCA provider (X9_63 KDF) */
-    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, dh_pkey, "?provider=ibmca");
-    if (ctx == NULL) {
-        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_derive_init(ctx) <= 0) {
-        fprintf(stderr, "EVP_PKEY_derive_init failed\n");
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "ibmca") != 0) {
-        fprintf(stderr, "Context is not using the IBMCA provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_PKEY_CTX_set_dh_kdf_type(ctx, EVP_PKEY_DH_KDF_X9_42) != 1) {
-        fprintf(stderr, "EVP_PKEY_CTX_set_dh_kdf_type failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_CTX_set_dh_kdf_md(ctx, EVP_get_digestbyname("SHA256")) != 1) {
-        fprintf(stderr, "EVP_PKEY_CTX_set_dh_kdf_md failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_CTX_set0_dh_kdf_oid(ctx, OBJ_nid2obj(NID_id_aes256_wrap)) != 1) {
-        fprintf(stderr, "EVP_PKEY_CTX_set0_dh_kdf_oid failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_CTX_set_dh_kdf_outlen(ctx, sizeof(keybuf1)) != 1) {
-        fprintf(stderr, "EVP_PKEY_CTX_set_dh_kdf_outlen failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_derive_set_peer_ex(ctx, peer_pkey, 1) != 1) {
-        fprintf(stderr, "EVP_PKEY_derive_set_peer_ex failed\n");
-        goto out;
-    }
-
     keylen1 = sizeof(keybuf1);
-    if (EVP_PKEY_derive(ctx, keybuf1, &keylen1) <= 0) {
-        fprintf(stderr, "EVP_PKEY_derive failed\n");
+    if (!derive_key("ibmca", dh_pkey, peer_pkey,
+                    EVP_PKEY_DH_KDF_X9_42, "SHA256", NID_id_aes256_wrap,
+                    sizeof(keybuf1), keybuf1, &keylen1))
         goto out;
-    }
-
-    EVP_PKEY_CTX_free(ctx);
-    ctx = NULL;
 
     /* Derive with default provider (X9_63 KDF) */
-    ctx = EVP_PKEY_CTX_new_from_pkey(NULL, dh_pkey, "provider=default");
-    if (ctx == NULL) {
-        fprintf(stderr, "EVP_PKEY_CTX_new_from_pkey failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_derive_init(ctx) <= 0) {
-        fprintf(stderr, "EVP_PKEY_derive_init failed\n");
-        goto out;
-    }
-
-    provider = EVP_PKEY_CTX_get0_provider(ctx);
-    if (provider == NULL) {
-        fprintf(stderr, "Context is not a provider-context\n");
-        goto out;
-    }
-
-    provname = OSSL_PROVIDER_get0_name(provider);
-    if (strcmp(provname, "default") != 0) {
-        fprintf(stderr, "Context is not using the default provider, but '%s'\n",
-               provname);
-        goto out;
-    }
-
-    if (EVP_PKEY_CTX_set_dh_kdf_type(ctx, EVP_PKEY_DH_KDF_X9_42) != 1) {
-        fprintf(stderr, "EVP_PKEY_CTX_set_dh_kdf_type failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_CTX_set_dh_kdf_md(ctx, EVP_get_digestbyname("SHA256")) != 1) {
-        fprintf(stderr, "EVP_PKEY_CTX_set_dh_kdf_md failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_CTX_set0_dh_kdf_oid(ctx, OBJ_nid2obj(NID_id_aes256_wrap)) != 1) {
-        fprintf(stderr, "EVP_PKEY_CTX_set0_dh_kdf_oid failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_CTX_set_dh_kdf_outlen(ctx, sizeof(keybuf2)) != 1) {
-        fprintf(stderr, "EVP_PKEY_CTX_set_dh_kdf_outlen failed\n");
-        goto out;
-    }
-
-    if (EVP_PKEY_derive_set_peer_ex(ctx, peer_pkey, 1) != 1) {
-        fprintf(stderr, "EVP_PKEY_derive_set_peer_ex failed\n");
-        goto out;
-    }
-
     keylen2 = sizeof(keybuf2);
-    if (EVP_PKEY_derive(ctx, keybuf2, &keylen2) <= 0) {
-        fprintf(stderr, "EVP_PKEY_derive failed\n");
+    if (!derive_key(NULL, dh_pkey, peer_pkey,
+                    EVP_PKEY_DH_KDF_X9_42, "SHA256", NID_id_aes256_wrap,
+                    sizeof(keybuf2), keybuf2, &keylen2))
         goto out;
-    }
 
     if (keylen1 != keylen2 || memcmp(keybuf1, keybuf2, keylen1) != 0) {
         fprintf(stderr, "Derived keys are not equal\n");
         goto out;
     }
 
-    ret = 1;
+    ok = 1;
 
  out:
     if (peer_pkey)
        EVP_PKEY_free(peer_pkey);
     if (dh_pkey)
        EVP_PKEY_free(dh_pkey);
-    if (ctx)
-       EVP_PKEY_CTX_free(ctx);
 
     ERR_print_errors_fp(stderr);
 
-    return ret;
+    return ok;
 }
 
 static const unsigned int required_ica_mechs[] = { RSA_ME };
@@ -359,7 +275,7 @@ static const unsigned int required_ica_mechs_len =
 typedef unsigned int (*ica_get_functionlist_t)(libica_func_list_element *,
                                                unsigned int *);
 
-int check_libica()
+static int check_libica()
 {
     unsigned int mech_len, i, k, found = 0;
     libica_func_list_element *mech_list = NULL;
