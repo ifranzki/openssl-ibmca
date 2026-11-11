@@ -79,6 +79,9 @@ static int ibmca_keymgmt_rsa_calc_priv_d(const struct ibmca_prov_ctx *provctx,
                                          BIGNUM *n, BIGNUM *e,
                                          BIGNUM *p, BIGNUM *q,
                                          BIGNUM **d);
+static int ibmca_keymgmt_rsa_inv_e_mod(const struct ibmca_prov_ctx *provctx,
+                                       BIGNUM *r, const BIGNUM *e,
+                                       const BIGNUM *m, BN_CTX *ctx);
 
 static int ibmca_keymgmt_rsa_pss_parms_from_data(
                                         const struct ibmca_prov_ctx *provctx,
@@ -261,13 +264,23 @@ static int ibmca_keymgmt_rsa_pub_key_to_data(
     return 1;
 }
 
+/*
+ * Note: This function runs only on key import when the CRT parameters are
+ * not supplied. qInv is computed with a constant-time exponentiation, and dp
+ * and dq are computed as e^-1 mod (p-1) and e^-1 mod (q-1) with
+ * ibmca_keymgmt_rsa_inv_e_mod(), which avoids a Euclidean algorithm on the
+ * secret values. The latter relies on the fixed-length BIGNUM operations of
+ * OpenSSL (BN_mul, BN_div_word, ...), so this is best-effort hardening, not a
+ * formal constant-time guarantee. Applications that need strict timing
+ * guarantees should supply the full set of CRT parameters on import.
+ */
 static int ibmca_keymgmt_rsa_derive_crt_from_pq(
                                         const struct ibmca_prov_ctx *provctx,
                                         BIGNUM *n, BIGNUM *e, BIGNUM *p,
                                         BIGNUM *q, BIGNUM *dp, BIGNUM *dq,
                                         BIGNUM *qinv)
 {
-    BIGNUM *d = NULL, *p1 = NULL, *q1 = NULL;
+    BIGNUM *p1 = NULL, *q1 = NULL, *p2 = NULL, *chk = NULL;
     BN_CTX *ctx = NULL;
     int rc = 0;
 
@@ -280,7 +293,9 @@ static int ibmca_keymgmt_rsa_derive_crt_from_pq(
 
     p1 = BN_CTX_get(ctx);
     q1 = BN_CTX_get(ctx);
-    if (p1 == NULL || q1 == NULL) {
+    p2 = BN_CTX_get(ctx);
+    chk = BN_CTX_get(ctx);
+    if (p1 == NULL || q1 == NULL || p2 == NULL || chk == NULL) {
         put_error_ctx(provctx, IBMCA_ERR_MALLOC_FAILED, "BN_CTX_get failed");
         goto out;
     }
@@ -298,32 +313,47 @@ static int ibmca_keymgmt_rsa_derive_crt_from_pq(
     BN_set_flags(dq, BN_FLG_CONSTTIME);
     BN_set_flags(qinv, BN_FLG_CONSTTIME);
 
-    rc = ibmca_keymgmt_rsa_calc_priv_d(provctx, n, e, p, q, &d);
-    if (rc != 1)
-        goto out;
-
-    rc = 0;
-
     /*
      * See SP800-56Br1 6.3.1.3 rsakpg1 - crt (Step 5)
      *
-     * (Step 5a) dP = d mod (p-1)
+     * (Step 5a) dP = d mod (p-1) = e^-1 mod (p-1), because (p-1) divides
+     * phi(n). Computing it directly avoids the secret-dependent BN_mod().
      */
-    if (!BN_mod(dp, d, p1, ctx)) {
-        put_error_ctx(provctx, IBMCA_ERR_INTERNAL_ERROR, "BN_mod failed");
-        goto out;
-    }
-
-    /* (Step 5b) dQ = d mod (q-1) */
-    if (!BN_mod(dq, d, q1, ctx)) {
-        put_error_ctx(provctx, IBMCA_ERR_INTERNAL_ERROR, "BN_mod failed");
-        goto out;
-    }
-
-    /* (Step 5c) qInv = (inverse of q) mod p */
-    if (BN_mod_inverse(qinv, q, p, ctx) == NULL) {
+    if (!ibmca_keymgmt_rsa_inv_e_mod(provctx, dp, e, p1, ctx)) {
         put_error_ctx(provctx, IBMCA_ERR_INTERNAL_ERROR,
-                      "BN_mod_inverse failed");
+                      "Failed to calculate dP");
+        goto out;
+    }
+
+    /* (Step 5b) dQ = d mod (q-1) = e^-1 mod (q-1) */
+    if (!ibmca_keymgmt_rsa_inv_e_mod(provctx, dq, e, q1, ctx)) {
+        put_error_ctx(provctx, IBMCA_ERR_INTERNAL_ERROR,
+                      "Failed to calculate dQ");
+        goto out;
+    }
+
+    /*
+     * (Step 5c) qInv = (inverse of q) mod p
+     *
+     * BN_mod_inverse() is variable-time, even with BN_FLG_CONSTTIME set, and
+     * p and q are secret. Since p is prime, use Fermat's little theorem:
+     * qInv = q^(p-2) mod p, computed with a constant-time exponentiation.
+     */
+    BN_set_flags(p2, BN_FLG_CONSTTIME);
+    if (!BN_sub(p2, p1, BN_value_one())) { /* p-2 */
+        put_error_ctx(provctx, IBMCA_ERR_MALLOC_FAILED, "BN_sub failed");
+        goto out;
+    }
+    if (!BN_mod_exp_mont_consttime(qinv, q, p2, p, ctx, NULL)) {
+        put_error_ctx(provctx, IBMCA_ERR_INTERNAL_ERROR,
+                      "BN_mod_exp_mont_consttime failed");
+        goto out;
+    }
+
+    /* Reject a malformed p, for which the result would not be an inverse */
+    if (!BN_mod_mul(chk, qinv, q, p, ctx) || !BN_is_one(chk)) {
+        put_error_ctx(provctx, IBMCA_ERR_INTERNAL_ERROR,
+                      "qInv verification failed");
         goto out;
     }
 
@@ -331,7 +361,6 @@ static int ibmca_keymgmt_rsa_derive_crt_from_pq(
 
 out:
     BN_CTX_free(ctx);
-    BN_free(d);
 
     return rc;
 }
@@ -1583,33 +1612,145 @@ error:
     return 0;
 }
 
+/*
+ * Calculates r = e^-1 mod m, where the public exponent e is public and the
+ * modulus m is secret (e.g. phi(n), p-1 or q-1) and not prime.
+ *
+ * BN_mod_inverse() would run a Euclidean algorithm whose number of iterations
+ * depends on the secret m, even with BN_FLG_CONSTTIME set. Instead, use
+ *
+ *     r = (1 + k * m) / e   with   k = -(m^-1) mod e,   0 < k < e
+ *
+ * which is an exact division and yields 0 < r < m with e * r = 1 mod m. The
+ * only inversion is done modulo the public e, and its operand (m mod e) is
+ * blinded with a random value coprime to e, so its running time does not
+ * depend on m.
+ *
+ * Note: This relies on the fixed-length BIGNUM operations of OpenSSL, so it is
+ * best-effort hardening and not a formal constant-time guarantee.
+ */
+static int ibmca_keymgmt_rsa_inv_e_mod(const struct ibmca_prov_ctx *provctx,
+                                       BIGNUM *r, const BIGNUM *e,
+                                       const BIGNUM *m, BN_CTX *ctx)
+{
+    BIGNUM *t, *s, *g, *u;
+    BN_ULONG ew = 0, rem;
+    int small, prime, rc = 0;
+
+    if (BN_cmp(e, BN_value_one()) <= 0) {
+        put_error_ctx(provctx, IBMCA_ERR_INVALID_PARAM,
+                      "Public exponent is too small");
+        return 0;
+    }
+
+    BN_CTX_start(ctx);
+    t = BN_CTX_get(ctx);
+    s = BN_CTX_get(ctx);
+    g = BN_CTX_get(ctx);
+    u = BN_CTX_get(ctx);
+    if (u == NULL) {
+        put_error_ctx(provctx, IBMCA_ERR_MALLOC_FAILED, "BN_CTX_get failed");
+        goto out;
+    }
+
+    small = BN_num_bits(e) <= BN_BITS2;
+    if (small)
+        ew = BN_get_word(e);
+
+    /* t = m mod e */
+    if (small) {
+        rem = BN_mod_word(m, ew);
+        if (rem == (BN_ULONG)-1 || !BN_set_word(t, rem))
+            goto out;
+    } else if (!BN_nnmod(t, m, e, ctx)) {
+        goto out;
+    }
+
+    /*
+     * s = random blinding value in [1, e-1], coprime to e. It must stay
+     * secret, otherwise the blinding can be undone. If e is prime (e.g.
+     * 65537), every such s is coprime to e, so the variable-time BN_gcd()
+     * is not needed and does not leak s.
+     */
+    prime = BN_check_prime(e, ctx, NULL);
+    if (prime < 0)
+        goto out;
+    for (;;) {
+        if (!BN_priv_rand_range(s, e))
+            goto out;
+        if (BN_is_zero(s))
+            continue;
+        if (prime == 1)
+            break;
+        if (!BN_gcd(g, s, e, ctx))
+            goto out;
+        if (BN_is_one(g))
+            break;
+    }
+
+    /* u = ((t * s)^-1 * s) mod e = t^-1 mod e. Fails if gcd(m, e) != 1. */
+    if (!BN_mod_mul(u, t, s, e, ctx) ||
+        BN_mod_inverse(u, u, e, ctx) == NULL ||
+        !BN_mod_mul(u, u, s, e, ctx))
+        goto out;
+
+    /* t = k = -(m^-1) mod e = e - u, since 0 < u < e */
+    if (!BN_sub(t, e, u))
+        goto out;
+
+    /* r = (1 + k * m) / e */
+    BN_set_flags(r, BN_FLG_CONSTTIME);
+    if (!BN_mul(r, t, m, ctx) || !BN_add_word(r, 1))
+        goto out;
+
+    if (small) {
+        rem = BN_div_word(r, ew);
+        if (rem != 0)
+            goto out;
+    } else {
+        if (!BN_div(r, g, r, e, ctx) || !BN_is_zero(g))
+            goto out;
+    }
+
+    rc = 1;
+
+out:
+    BN_CTX_end(ctx);
+
+    return rc;
+}
+
 static int ibmca_keymgmt_rsa_calc_priv_d(const struct ibmca_prov_ctx *provctx,
                                          BIGNUM *n, BIGNUM *e,
                                          BIGNUM *p, BIGNUM *q,
                                          BIGNUM **d)
 {
     BN_CTX *bn_ctx;
+    BIGNUM *phi;
 
     /*
      * phi(n) = (p - 1 )(q - 1) = n - p - q + 1
      * d = e ^{-1} mod phi(n).
      */
-    bn_ctx = BN_CTX_new();
+    bn_ctx = BN_CTX_secure_new();
+    phi = BN_secure_new();
     *d = BN_secure_new();
-    if (bn_ctx == NULL || *d == NULL ||
-        BN_copy(*d, n) == NULL ||
-        BN_sub(*d, *d, p) == 0 ||
-        BN_sub(*d, *d, q) == 0 ||
-        BN_add_word(*d, 1) == 0 ||
-        BN_mod_inverse(*d, e, *d, bn_ctx) == NULL) {
+    if (bn_ctx == NULL || phi == NULL || *d == NULL ||
+        BN_copy(phi, n) == NULL ||
+        BN_sub(phi, phi, p) == 0 ||
+        BN_sub(phi, phi, q) == 0 ||
+        BN_add_word(phi, 1) == 0 ||
+        ibmca_keymgmt_rsa_inv_e_mod(provctx, *d, e, phi, bn_ctx) == 0) {
         put_error_ctx(provctx, IBMCA_ERR_INTERNAL_ERROR,
                       "Failed to calculate private key part d");
         BN_CTX_free(bn_ctx);
+        BN_clear_free(phi);
         BN_clear_free(*d);
         *d = NULL;
         return 0;
     }
     BN_CTX_free(bn_ctx);
+    BN_clear_free(phi);
 
     return 1;
 }
